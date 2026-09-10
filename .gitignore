@@ -1,0 +1,7 @@
+bin/
+obj/
+/identity.json
+/session.json
+*.user
+.vs/
+.idea/
