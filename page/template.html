@@ -239,6 +239,31 @@
     <span style="color:var(--warn)">测试连接会顶掉当前会话密钥</span> ——
     要是已经跟真人交换过公钥，之后得重新交换。
   </p>
+
+  <hr style="border:0;border-top:1px solid var(--line);margin:14px 0 12px">
+
+  <h3>📥 反向测试：我当接收方</h3>
+  <p>
+    模拟<strong>对方把公钥发过来</strong>，你站在接收端看状态怎么变。
+    这三步走的是<strong>真实的接收路径</strong>（<code>handleIncoming</code>），
+    不是绕过它直接调 <code>setPeerPub</code>。
+  </p>
+  <div class="row">
+    <button class="act ghost" id="btnPeerClear">🧹 1. 清空对方（回到未交换）</button>
+  </div>
+  <div class="row">
+    <button class="act" id="btnPeerSend">📨 2a. 发出对方的公钥（走微信）</button>
+    <button class="act ghost" id="btnPeerFeed">📥 2b. 本机直接收下</button>
+  </div>
+  <div class="row">
+    <button class="act ghost" id="btnSelfFeed">🙅 3. 收下我自己的公钥</button>
+  </div>
+  <p class="fine" id="peerTestMsg" style="min-height:1.5em"></p>
+  <p class="fine">
+    预期：清空后密钥药丸变<strong>黄</strong>、输入框<strong>禁用</strong>；
+    收下对方的公钥后变<strong>绿</strong>、输入框<strong>启用</strong>、显示指纹；
+    收下自己的公钥应该被<strong>拒绝</strong>（"这是你自己的公钥，忽略"）。
+  </p>
   <p class="fine js-build" style="opacity:.65"></p>
 </div>
 </header>
@@ -404,6 +429,20 @@ var Crypto = (function(){
     return ensureIdentity();
   }
 
+  /**
+   * 只清掉"对方"，保留自己的身份。
+   *
+   * 反向测试要能回到"还没交换"的状态来观察药丸怎么变绿，
+   * 但不能连自己的密钥一起换掉 —— 否则指纹会变，跟真人的配对关系全乱。
+   */
+  function clearPeer(){
+    peerPubRaw = null;
+    sendKey = recvKey = null;
+    sendRaw = recvRaw = null; testKeys = null;
+    sendCtr = 0; recvCtrMax = -1; peerCtr = 0;
+    return Promise.resolve();
+  }
+
   function setPeerPub(raw){
     if (raw.length !== 65 || raw[0] !== 4) {
       return Promise.reject(new Error("公钥格式不对（P-256 未压缩点应为 65 字节）"));
@@ -544,6 +583,7 @@ var Crypto = (function(){
   return {
     ensureIdentity: ensureIdentity,
     resetIdentity: resetIdentity,
+    clearPeer: clearPeer,
     setPeerPub: setPeerPub,
     encrypt: encrypt,
     decrypt: decrypt,
@@ -966,6 +1006,89 @@ function runLoopback(plaintext, envelope){
   });
 }
 
+/* =====================================================================
+ * 反向测试：我当接收方
+ *
+ * 补的是一个真实的测试缺口 —— handleIncoming 里那条"收到对方公钥"的分支
+ * （前缀识别 / 自己的公钥要拒 / setPeerPub / refreshPills）以及它引发的
+ * 界面状态切换，之前一行测试都没有。
+ *
+ * 页面里 handleIncoming 只有两个入口：
+ *   Bridge.onText(...)  -> source "clipboard"   真实路径（对面在微信里 Ctrl+C）
+ *   runLoopback(...)    -> source "test"        测试回路，只喂密文，从不喂公钥
+ * 所以下面用 "clipboard" 当来源喂进去 —— 跟真的从微信收到一模一样。
+ * ===================================================================== */
+
+function peerTestSay(msg, cls){
+  var el = $("peerTestMsg");
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = cls === "bad" ? "var(--bad)"
+                 : cls === "ok"  ? "var(--ok)"
+                 : "var(--dim)";
+}
+
+/** 造一把"对方的"ECDH 公钥，返回对方会发给我的那个 E2E1-K. 信封。 */
+function makePeerKeyEnvelope(){
+  return crypto.subtle.generateKey({name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
+    .then(function(kp){ return crypto.subtle.exportKey("raw", kp.publicKey); })
+    .then(function(raw){ return PREFIX_KEY + b64uEncode(new Uint8Array(raw)); });
+}
+
+/** 第 1 步：清空对方，让状态回到"还没交换"。 */
+function peerTestReset(){
+  Crypto.clearPeer();
+  testMode = false;
+  addSys("🧪 [接收方测试] 已清空对方公钥 —— 现在药丸应该是黄的、输入框禁用");
+  peerTestSay("已清空。药丸应该是「密钥 未就绪」（黄），输入框灰色禁用。", "ok");
+  refreshPills();
+  beacon("peer-test-reset");
+}
+
+/** 第 2a 步：把对方的公钥真的发到微信，你自己去 Ctrl+C。 */
+function peerTestSend(){
+  peerTestSay("正在生成对方的公钥…");
+  makePeerKeyEnvelope().then(function(env){
+    addSys("🧪 [接收方测试] 下面是模拟对方要发过来的公钥：");
+    addSys(env);
+
+    if (Bridge.isConnected() && sendViaBridge(env, "对方的公钥")) {
+      peerTestSay("已发到微信。现在去微信里选中它按 Ctrl+C —— 页面会当成真的收到。");
+      addSys("🧪 去微信当前对话里选中那条消息，按 Ctrl+C");
+    } else {
+      peerTestSay("桥没连上。可以点「本机直接收下」，或手动把这行复制到微信再 Ctrl+C。");
+    }
+    testMode = true;        // 收下之后想接着试一问一答回路
+    beacon("peer-test-send");
+  }).catch(function(e){
+    peerTestSay("生成失败: " + e.message, "bad");
+  });
+}
+
+/** 第 2b 步：不走微信，直接把对方的公钥喂进接收路径。 */
+function peerTestFeed(){
+  peerTestSay("正在把对方的公钥喂进接收路径…");
+  makePeerKeyEnvelope().then(function(env){
+    addSys("🧪 [接收方测试] 把这条公钥当作从剪贴板收到：");
+    addSys(env);
+    testMode = true;        // 同上：收下后可以继续试回路
+    handleIncoming(env, "clipboard");
+    beacon("peer-test-feed");
+  }).catch(function(e){
+    peerTestSay("失败: " + e.message, "bad");
+  });
+}
+
+/** 第 3 步：把自己的公钥喂进去，应该被 "这是你自己的公钥，忽略" 挡下。 */
+function selfKeyFeed(){
+  var env = Crypto.myKeyEnvelope();
+  addSys("🧪 [接收方测试] 把我自己的公钥当作从剪贴板收到：");
+  addSys(env);
+  peerTestSay("喂进去了。正确结果是被拒绝，药丸保持原样。");
+  handleIncoming(env, "clipboard");
+  beacon("peer-test-self");
+}
+
 /* ---------- 三个药丸的点击行为 ---------- */
 $("pillBridge").addEventListener("click", function(e){
   e.stopPropagation();
@@ -1295,6 +1418,10 @@ $("btnTestSend").addEventListener("click", sendTestMessage);
 $("btnTestSend2").addEventListener("click", sendTestMessage);
 $("btnTestConnect").addEventListener("click", testConnect);
 $("btnTestExit").addEventListener("click", testExit);
+$("btnPeerClear").addEventListener("click", peerTestReset);
+$("btnPeerSend").addEventListener("click", peerTestSend);
+$("btnPeerFeed").addEventListener("click", peerTestFeed);
+$("btnSelfFeed").addEventListener("click", selfKeyFeed);
 $("btnPasteBig").addEventListener("click", showPasteFallback);
 $("btnClosePaste").addEventListener("click", closePasteFallback);
 $("btnCopyPaste").addEventListener("click", function(){
