@@ -136,6 +136,14 @@
   button.act:disabled{opacity:.45;cursor:not-allowed}
   button.act.ghost{background:transparent;border:1px solid var(--line);color:var(--text);font-weight:400}
 
+  /* ---------- 手动收下 ---------- */
+  .recvbox{display:block;width:100%;height:66px;flex:none;resize:vertical;
+           background:#0b0d12;color:var(--text);border:1px solid var(--line);
+           border-radius:8px;padding:8px 10px;margin:6px 0 0;
+           font:11px/1.5 ui-monospace,Consolas,monospace;outline:none}
+  .recvbox:focus{border-color:var(--accent)}
+  .recvbox::placeholder{color:#5a6172}
+
   /* ---------- 测试弹窗里的复选框 ---------- */
   .chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);
        margin:11px 0 0;cursor:pointer;user-select:none}
@@ -208,6 +216,24 @@
   </div>
   <p class="fine">
     公钥以 <code>E2E1-K.…</code> 开头，会作为一条普通微信消息发出去 —— 别人看起来就是一串乱码。
+  </p>
+
+  <hr style="border:0;border-top:1px solid var(--line);margin:13px 0 11px">
+
+  <h3>📥 手动收下</h3>
+  <p>
+    把对面发来的那条 <code>E2E1-K.…</code> 整条粘进来点「收下」。
+    跟桥推过来走的是<strong>同一条接收路径</strong>（<code>handleIncoming</code>）。
+  </p>
+  <textarea class="recvbox" id="pasteIn" placeholder="E2E1-K.…（整条粘进来，再点下面的收下）" spellcheck="false"></textarea>
+  <div class="row">
+    <button class="act" id="btnRecvManual">📥 收下</button>
+    <button class="act ghost" id="btnRecvClip">从剪贴板读一次</button>
+  </div>
+  <p class="fine">
+    <span style="color:var(--dim)">为什么需要这个：页面自己读不到微信，
+    正常情况靠桥监听剪贴板把消息推进来。桥没跑、页面没连上、或者剪贴板那条链断了，
+    这里就是唯一能手动接上的入口。</span>
   </p>
   <p class="fine js-build" style="opacity:.65"></p>
   </div>
@@ -321,7 +347,7 @@ var BRIDGE_B64 = "Ly8gYnJpZGdlLmNzIC0tIFdlQ2hhdCBjbGlwYm9hcmQgYnJpZGdlLgovLwovLy
 /* 构建戳。显示在弹窗底部，用来判断"浏览器里跑的是哪一版"。
  * 踩过的坑：磁盘上 chat.html 早就更新了，但打开的标签页还是旧代码，
  * 结果在一个已经修好的 bug 上白排查半天。 */
-var BUILD = "2026-09-18 13:57:49 · cs:d0560e9b";
+var BUILD = "2026-09-18 17:01:57 · cs:d0560e9b";
 
 /* =====================================================================
  * 小工具
@@ -741,7 +767,12 @@ function refreshPills(){
     $("keyDot").className = "b warn"; $("keyText").textContent = "正在协商…";
   } else {
     kp.textContent = "密钥 未就绪"; kp.className = "pill warn";
-    $("keyDot").className = "b warn"; $("keyText").textContent = "还没跟对方交换公钥";
+    $("keyDot").className = "b warn";
+    // 发出自己的公钥**不会**让自己变绿 —— 必须等对方的公钥进来。
+    // 把"我已经发出去了"明说出来，否则用户点完看药丸还是黄的会以为没生效。
+    $("keyText").textContent = myKeySent
+      ? "已发出自己的公钥 —— 正在等对方的公钥进来"
+      : "还没跟对方交换公钥";
   }
 
   var f = $("keyFinger");
@@ -766,6 +797,11 @@ function refreshPills(){
  * 却不知道是哪一条失败。用队列而不是单个变量 —— 测试模式下一次操作
  * 会发两条（出站密文 + 对方的回复密文），单个变量会被覆盖导致张冠李戴。 */
 var pendingQueue = [];
+
+/* 我有没有把公钥发出去过。
+ * 用它把"点了密钥但还没等到对方"这件事说出来 —— 否则用户点完看药丸还是黄的，
+ * 会以为没生效。真踩过：用户把自己发出去的公钥当成对方的，纳闷为什么没配置上。 */
+var myKeySent = false;
 
 /**
  * 统一的发送出口。跟旧代码的关键区别：**检查 Bridge.send 的返回值**。
@@ -1116,9 +1152,11 @@ $("pillKey").addEventListener("click", function(e){
 
   var env = Crypto.myKeyEnvelope();
   showPop("popKey");
+  myKeySent = true;
   if (Bridge.isConnected()) {
     if (sendViaBridge(env, "公钥")) {
       addSys("公钥已交给桥（指纹 " + Crypto.myFingerprint() + "），等回执…");
+      addSys("注意：发出自己的公钥不会让你变绿 —— 要等对方的公钥进来");
     } else {
       copyText(env);
       addSys("改走剪贴板：公钥已复制，去微信里 Ctrl+V 即可", "ok");
@@ -1127,6 +1165,7 @@ $("pillKey").addEventListener("click", function(e){
     copyText(env);
     addSys("桥未连接，公钥已复制到剪贴板 —— 去微信粘贴给对面即可", "ok");
   }
+  refreshPills();
 });
 
 $("send").addEventListener("click", function(){
@@ -1142,6 +1181,61 @@ $("input").addEventListener("keydown", function(e){
 $("input").addEventListener("input", function(){
   this.style.height = "42px";
   this.style.height = Math.min(this.scrollHeight, 140) + "px";
+});
+
+/* =====================================================================
+ * 手动收下
+ *
+ * 为什么必须有这个入口（真踩过）：
+ *   页面的入站口只有 Bridge.onText —— 必须"桥在跑 + 页面连着 +
+ *   剪贴板变化被监听到"三件事同时成立。任何一件不成立，对面的公钥就进不来，
+ *   而页面上连个能粘贴的地方都没有，只能干看着药丸一直是黄的。
+ *   所以补一个纯手动的口子，走的是同一个 handleIncoming。
+ * ===================================================================== */
+
+function recvManual(text, how){
+  var t = String(text == null ? "" : text).trim();
+  if (!t) { addSys("收下失败（" + how + "）：内容是空的", "bad"); return false; }
+
+  // 信封里绝不含空白字符；从微信/记事本粘过来容易带换行和空格，先清掉
+  if (t.indexOf("E2E1-") === 0) t = t.replace(/\s+/g, "");
+
+  if (t.indexOf(PREFIX_KEY) !== 0 && t.indexOf(PREFIX_MSG) !== 0) {
+    addSys("收下失败（" + how + "）：这不像一条加密消息，应该以 "
+           + PREFIX_KEY + " 或 " + PREFIX_MSG + " 开头", "bad");
+    beacon("recv-manual-bad", "len=" + t.length);
+    return false;
+  }
+
+  beacon("recv-manual", how + " len=" + t.length);
+  addSys("已交给接收路径（" + how + "，" + t.length + " 字符）");
+  handleIncoming(t, "manual");
+  return true;
+}
+
+function recvManualFromBox(){
+  var el = $("pasteIn");
+  if (recvManual(el.value, "粘贴框")) el.value = "";
+}
+
+/** 从系统剪贴板直接读一次 —— 剪贴板里明明有、桥却没推过来时的救命按钮。 */
+function recvManualFromClipboard(){
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    addSys("这个环境不允许读剪贴板（沙箱里常见）—— 请手动粘贴到框里再点「收下」", "bad");
+    return;
+  }
+  navigator.clipboard.readText().then(function(t){
+    if (recvManual(t, "剪贴板")) $("pasteIn").value = "";
+  }).catch(function(e){
+    addSys("读剪贴板失败（" + ((e && e.name) || "?") + "）—— 请手动粘贴到框里再点「收下」", "bad");
+  });
+}
+
+$("btnRecvManual").addEventListener("click", recvManualFromBox);
+$("btnRecvClip").addEventListener("click", recvManualFromClipboard);
+$("pasteIn").addEventListener("keydown", function(e){
+  // 框里要能换行，所以用 Ctrl+Enter 提交而不是 Enter
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); recvManualFromBox(); }
 });
 
 $("btnCopyKey").addEventListener("click", function(){

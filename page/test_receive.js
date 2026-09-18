@@ -122,10 +122,12 @@ eval(m[1] + `
 ;globalThis.__P = {
   Crypto: Crypto,
   handleIncoming: handleIncoming,
+  recvManual: recvManual,
   refreshPills: refreshPills,
   PREFIX_KEY: PREFIX_KEY,
   PREFIX_MSG: PREFIX_MSG,
   b64uEncode: b64uEncode,
+  getMyKeySent: function(){ return myKeySent; },
   $: $,
 };
 `);
@@ -251,6 +253,58 @@ const settle = () => new Promise(r => setTimeout(r, 60));
   check(pillKey().textContent === "密钥 已就绪",
         "换一把新公钥再收一次 → 药丸重新变绿", pillKey().textContent);
   check(input().disabled === false, "换一把新公钥再收一次 → 输入框解锁");
+
+  // ---------- 手动收下（粘贴框那条路） ----------
+  P.Crypto.clearPeer();
+  P.refreshPills();
+
+  const kp3 = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const raw3 = new Uint8Array(await crypto.subtle.exportKey("raw", kp3.publicKey));
+  const env3 = P.PREFIX_KEY + P.b64uEncode(raw3);
+
+  check(P.recvManual("", "测试") === false, "手动收下：空内容被拒");
+  check(logHas("内容是空的"), "手动收下：空内容有提示");
+
+  check(P.recvManual("你好呀", "测试") === false, "手动收下：不是加密消息被拒");
+  check(logHas("不像一条加密消息"), "手动收下：非加密内容有提示");
+
+  check(P.recvManual(env3, "测试") === true, "手动收下：合法公钥信封被接受");
+  await settle();
+  check(pillKey().textContent === "密钥 已就绪",
+        "手动收下对方公钥 → 药丸变绿", pillKey().textContent);
+  check(input().disabled === false, "手动收下对方公钥 → 输入框解锁");
+
+  // 从微信/记事本粘过来常带换行和空格，必须能容忍
+  P.Crypto.clearPeer();
+  P.refreshPills();
+  const messy = "  " + env3.slice(0, 40) + "\n" + env3.slice(40) + "  \r\n";
+  check(P.recvManual(messy, "带空白") === true, "手动收下：带换行和空格的也能收");
+  await settle();
+  check(pillKey().textContent === "密钥 已就绪",
+        "手动收下（带空白）→ 药丸同样变绿", pillKey().textContent);
+
+  // ---------- 自己的公钥：合法信封，但必须被拒 ----------
+  P.Crypto.clearPeer();
+  P.refreshPills();
+  P.recvManual(P.Crypto.myKeyEnvelope(), "测试");
+  await settle();
+  check(logHas("这是你自己的公钥，忽略"),
+        "手动收下自己的公钥 → 被拒", JSON.stringify(logLines().slice(-2)));
+  check(pillKey().textContent === "密钥 未就绪",
+        "手动收下自己的公钥 → 药丸保持黄色", pillKey().textContent);
+
+  // ---------- 发出一份密文，确认手动收下也能解密 ----------
+  const kp4 = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const raw4 = new Uint8Array(await crypto.subtle.exportKey("raw", kp4.publicKey));
+  P.recvManual(P.PREFIX_KEY + P.b64uEncode(raw4), "测试");
+  await settle();
+  const envMsg = await P.Crypto.testEncryptAsPeer("手动词收到的回复");
+  const nBubbles = $(("log")).children.length;
+  check(P.recvManual(envMsg, "测试") === true, "手动收下：密文信封被接受");
+  await settle();
+  check($(("log")).children.length > nBubbles, "手动收下密文 → 日志里多出一条气泡");
 
   console.log("");
   console.log("通过 " + pass + " / " + (pass + fail));

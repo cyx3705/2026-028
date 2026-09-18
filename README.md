@@ -21,7 +21,7 @@
 
 | 部件 | 是什么 | 为什么这么做 |
 |---|---|---|
-| `page/chat.html` | **单文件网页**（108 KB），发给对方的就是它 | 加解密全在浏览器里，**零安装**。它把桥的源码也内嵌进去了 |
+| `page/chat.html` | **单文件网页**（113 KB），发给对方的就是它 | 加解密全在浏览器里，**零安装**。它把桥的源码也内嵌进去了 |
 | `cs/bridge.cs` | **剪贴板桥**，C# / .NET Framework 4.x | 用每个 Windows 都自带的 `csc.exe` 现场编译，**用户什么都不用装** |
 
 桥只做两件事，都靠剪贴板：
@@ -70,7 +70,7 @@ SecurityError: Sandboxed documents aren't allowed to show a file picker.
 │   ├── build_page.py          把 cs/bridge.cs 以 base64 注入模板，生成 chat.html
 │   ├── check_ids.py           静态自检：$("x") 引用的元素必须真的存在
 │   ├── test_loopback.js       密码学验证（真 WebCrypto，18/18）
-│   ├── test_receive.js        接收路径与界面状态验证（DOM 桩，25/25）
+│   ├── test_receive.js        接收路径与界面状态验证（DOM 桩，38/38）
 │   └── README.md              网页侧详细文档
 │
 ├── cs/                        桥
@@ -133,7 +133,7 @@ python build_page.py
 | 测试 | 覆盖 | 结果 |
 |---|---|---|
 | `page/test_loopback.js` | 把页面里的 `Crypto` 模块**原样抠出来**，在 Node 里跑真 WebCrypto：协商 / 双向收发 / 篡改被拒 / 重放被拒 / IV 不重用且递增 / **两把密钥确实不同** | **18 / 18** |
-| `page/test_receive.js` | 把整个页面脚本用 **DOM 桩**加载，直接调页面里的 `handleIncoming`（跟"对面 Ctrl+C"同一个入口）：**收下对方公钥后药丸变绿、输入框解锁、指纹显示**；自己的公钥被拒；坏公钥不破坏状态 | **25 / 25** |
+| `page/test_receive.js` | 把整个页面脚本用 **DOM 桩**加载，直接调页面里的 `handleIncoming`（跟"对面 Ctrl+C"同一个入口）：**收下对方公钥后药丸变绿、输入框解锁、指纹显示**；自己的公钥被拒；坏公钥不破坏状态；**手动收下**（粘贴框）各条分支 | **38 / 38** |
 | `wsprobe.py --status` | 桥的 WebSocket 是否活着（安全探针，不碰微信、不按键） | ✅ |
 | `wsprobe.py --send "…"` | 真发一条到微信当前对话 | ✅ `{"sent","ok":true}` |
 | 微信落地 | 桥的 `/shot` 截图 + 侧栏预览核对 | ✅ |
