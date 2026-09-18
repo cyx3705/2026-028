@@ -1,0 +1,8 @@
+# 一律不做行尾自动转换：本仓库要保证字节级可复现。
+#
+# 原因：cs\bridge.cs 的 sha256 会进 chat.html 的构建戳（build_page.py 算的），
+# 而 chat.html 是直接发给对方的构建产物。任何自动换行转换都会让
+# 「仓库里存的」和「本机构建出来的」对不上，排查起来极其费时。
+#
+# 顺带绕开 core.autocrlf=true 带来的 "LF will be replaced by CRLF" 噪音。
+* -text
