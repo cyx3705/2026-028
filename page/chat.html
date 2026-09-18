@@ -235,37 +235,19 @@
   </p>
 
   <div class="row" style="flex-wrap:wrap;gap:6px">
-    <button class="act" id="btnListSessions">🔗 选择会话</button>
-    <button class="act ghost" id="btnDiag">🩺 诊断</button>
+    <button class="act" id="btnPull">📥 拉取最近消息（手动）</button>
+    <label class="fine" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">
+      <input type="checkbox" id="chkAutoPull" checked>
+      收到消息自动拉取
+    </label>
   </div>
-
-  <!-- 诊断输出：识别失败时把"卡在哪一步"原样贴出来 -->
-  <pre id="diagBox" hidden
-       style="margin:8px 0 0;padding:8px 10px;border:1px solid var(--line);
-              border-radius:10px;background:rgba(0,0,0,.25);white-space:pre-wrap;
-              word-break:break-all;font-size:12px;line-height:1.5;max-height:220px;
-              overflow:auto"></pre>
-
-  <!-- 会话选择：弹出最近有动静的那几个对话，每条用"它的最新一条消息"当身份 -->
-  <div id="sessionPanel" hidden
-       style="margin:8px 0 0;border:1px solid var(--line);border-radius:10px;
-              background:var(--panel,#161a20);overflow:hidden">
-    <div class="row" style="align-items:center;gap:8px;padding:8px 10px;
-                             border-bottom:1px solid var(--line)">
-      <strong style="font-size:13px">最近有动静的对话</strong>
-      <span class="fine" id="sessionHint" style="color:var(--dim);flex:1"></span>
-      <button class="act ghost" id="btnRefreshSessions" style="padding:3px 9px">🔄 刷新</button>
-      <button class="act ghost" id="btnCloseSessions" style="padding:3px 9px">✕</button>
-    </div>
-    <div id="sessionList"></div>
-  </div>
-
   <p class="fine">
-    点「选择会话」弹出<strong>最近有动静的 3–5 个对话</strong>，每条拿它<strong>最新那条消息</strong>
-    当身份（时间 + 对方 + 消息内容）。选一条就绑定，之后只读它；点「🔄 刷新」重新识别一次最新的消息。
-    <br><span style="color:var(--dim)">识别走两条路：会话行给出"最新消息的 local_id"，
-    表名由对方 wxid 直接算出 <code>Msg_&lt;md5&gt;</code>；根页不在页缓存里时，
-    就按 local_id 去内存页映像里认那一页。识别不到正文的（公众号等）回落成会话摘要。</span>
+    桥直接从微信进程内存里读 <strong>SQLCipher 解密后的页</strong>：
+    不用密钥、不动鼠标、不占剪贴板、不改焦点。
+    <strong>中文原样显示，密文自动解密</strong>，取最近 5 条。
+    <br><span style="color:var(--dim)">看得到的是<strong>页缓存里还有的页</strong>，
+    所以它的正确用法是"消息一到就去读" —— 刚写入的页必然还在缓存里。
+    要盯死某一个对话，点顶栏的 <strong>🔗 胶囊</strong>。</span>
   </p>
 
   <hr style="border:0;border-top:1px solid var(--line);margin:13px 0 11px">
@@ -287,6 +269,37 @@
   </p>
   <p class="fine js-build" style="opacity:.65"></p>
   </div>
+
+<!-- 会话：点顶栏 🔗 胶囊展开。弹出最近有动静的那几个对话，
+     每条用"它最新那条消息"当身份 -->
+<div class="pop" id="popBind" style="min-width:min(430px,92vw)">
+  <button class="close" data-close="popBind">×</button>
+  <h3>🔗 会话 <span class="fine" id="bindState" style="color:var(--dim);font-weight:400"></span></h3>
+  <div class="row" style="gap:8px;align-items:center">
+    <button class="act ghost" id="btnRefreshSessions" style="padding:3px 9px">🔄 刷新</button>
+    <button class="act ghost" id="btnDiag" style="padding:3px 9px">🩺 诊断</button>
+    <span class="fine" id="sessionHint" style="color:var(--dim);margin:0;flex:1"></span>
+  </div>
+
+  <div id="sessionList" style="margin:8px 0 0;border:1px solid var(--line);
+       border-radius:10px;overflow:hidden;max-height:min(46vh,340px);overflow-y:auto"></div>
+
+  <!-- 诊断输出：识别失败时把"卡在哪一步"原样贴出来 -->
+  <pre id="diagBox" hidden
+       style="margin:8px 0 0;padding:8px 10px;border:1px solid var(--line);
+              border-radius:10px;background:rgba(0,0,0,.25);white-space:pre-wrap;
+              word-break:break-all;font-size:12px;line-height:1.5;max-height:220px;
+              overflow:auto"></pre>
+
+  <p class="fine">
+    <strong>最近有动静的 3–5 个对话</strong>，每条拿它<strong>最新那条消息</strong>当身份
+    （时间 + 对方 + 正文）。点一条就绑定，之后只读它、而且<strong>自己发的不再当收到的</strong>。
+    点最上面那条「（自动）」= 解绑。点「🔄 刷新」重新识别一次最新的消息。
+    <br><span style="color:var(--dim)">识别走两条路：会话行给出"最新消息的 local_id"，
+    表名由对方 wxid 直接算出 <code>Msg_&lt;md5&gt;</code>；根页不在页缓存里时，
+    就按 local_id 去内存页映像里认那一页。读不到正文的（公众号等）回落成会话摘要。</span>
+  </p>
+</div>
 
 <!-- 测试：假装第二端 -->
 <div class="pop" id="popTest">
@@ -398,7 +411,7 @@ var WXDB_B64 = "Ly8gd3hkYi5jcyAtLSByZWFkIFdlQ2hhdCdzIG1lc3NhZ2UgZGF0YWJhc2UgV0lU
 /* 构建戳。显示在弹窗底部，用来判断"浏览器里跑的是哪一版"。
  * 踩过的坑：磁盘上 chat.html 早就更新了，但打开的标签页还是旧代码，
  * 结果在一个已经修好的 bug 上白排查半天。 */
-var BUILD = "2026-09-18 23:46:29 · cs:86d2e672";
+var BUILD = "2026-09-18 23:50:46 · cs:86d2e672";
 
 /* =====================================================================
  * 小工具
@@ -843,10 +856,10 @@ function addBubble(text, dir, meta){
 
 /* ---------- 弹出面板 ---------- */
 function showPop(id){
-  ["popBridge","popKey","popTest"].forEach(function(p){ $(p).classList.toggle("show", p === id); });
+  ["popBridge","popKey","popTest","popBind"].forEach(function(p){ $(p).classList.toggle("show", p === id); });
 }
 function hidePops(){
-  ["popBridge","popKey","popTest"].forEach(function(p){ $(p).classList.remove("show"); });
+  ["popBridge","popKey","popTest","popBind"].forEach(function(p){ $(p).classList.remove("show"); });
 }
 document.addEventListener("click", function(e){
   if (e.target.closest(".pop") || e.target.closest(".pill")) return;
@@ -923,12 +936,23 @@ function refreshBindPill(){
   if (boundTable || boundWho) {
     p.textContent = "🔗 " + (boundWho || boundTable).slice(0, 22);
     p.className = "pill ok";
-    p.title = "只读这一个会话：" + (boundWho || "") + " " + (boundTable || "");
+    p.title = "只读这一个会话：" + (boundWho || "") + " " + (boundTable || "")
+            + "（点开可以换或解绑）";
   } else {
     p.textContent = "🔗 自动";
     p.className = "pill";
-    p.title = "任何有动静的会话都读（点「选择会话」可以绑定一个）";
+    p.title = "任何有动静的会话都读（点开可以绑定一个）";
   }
+  refreshBindState();
+}
+
+/** 会话面板标题旁边那行小字：现在到底绑着谁。 */
+function refreshBindState(){
+  var s = $("bindState");
+  if (!s) return;
+  s.textContent = (boundTable || boundWho)
+    ? "已绑定 " + (boundWho || boundTable) + "（点最上面那条可解绑）"
+    : "自动模式";
 }
 
 /* 我有没有把公钥发出去过。
@@ -1174,7 +1198,7 @@ Bridge.onState(function(kind, arg){
     boundTable = bt;
     boundWho = bw;
     refreshBindPill();
-    if (bt) { var sp = $("sessionPanel"); if (sp) sp.hidden = true; }
+    if (bt) hidePops();
     addSys(bt ? "桥已绑定会话 " + (bw || bt) + "（只读这一个，自己发的不再当收到的）"
               : "桥已解绑，回到自动模式（任何有动静的会话都读）", "ok");
   }
@@ -1638,14 +1662,8 @@ function pullRecent(){
 }
 
 /**
- * 桥报回来的"现在能读到的会话"列表。填进下拉框，由人挑一个绑定。
- *
- * 列表来自消息库里每张 Msg_<md5> 表的最右叶子（新行必在最右边），
- * 刻意不依赖 session.db —— 会话表只缓存得到一部分，实测 153 个会话里
- * 只读得出 53 个，而"读不出来的那个对话"正是以前识别不到的那个。
- */
-/**
- * 会话选择：弹出最近有动静的 3–5 个对话，每条拿"它最新那条消息"当身份。
+ * 会话选择：点顶栏 🔗 胶囊展开，列出最近有动静的 3–5 个对话，
+ * 每条拿"它最新那条消息"当身份。
  *
  * 列表由桥给：桥用会话行的 last_msg_locald_id + Msg_<md5(wxid)> 定位，
  * 所以"页缓存里根页不在"的对话也能列出来；正文读不到时回落成会话摘要。
@@ -1665,7 +1683,7 @@ function onTables(list){
   if (!box) return;
   box.innerHTML = "";
   if (!list.length) {
-    addSys("桥现在一个对话都识别不出来。已经把现场抓出来贴在下面，看「诊断」里卡在哪一步", "bad");
+    addSys("桥现在一个对话都识别不出来。已经把现场抓出来贴在下面，看「🩺 诊断」里卡在哪一步", "bad");
     $("sessionHint").textContent = "0 个";
     if (!Bridge.diag()) addSys("诊断请求没发出去", "bad");
     return;
@@ -1721,24 +1739,12 @@ function onTables(list){
   beacon("tables-ok", "n=" + list.length);
 }
 
-$("btnListSessions").addEventListener("click", function(){
-  beacon("list-sessions-click");
-  if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
-  $("sessionPanel").hidden = false;
-  $("sessionHint").textContent = "正在识别…";
-  addSys("正在让桥重新识别最新的消息（要抓一次内存快照，约 0.5 秒）…");
-  if (!Bridge.listSessions()) addSys("请求没发出去：WebSocket 没打开", "bad");
-});
-
 $("btnRefreshSessions").addEventListener("click", function(){
   beacon("refresh-sessions-click");
   if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
   $("sessionHint").textContent = "正在重新识别…";
+  addSys("重新识别最新的消息（抓一次内存快照，约 1 秒）…");
   if (!Bridge.listSessions()) addSys("刷新请求没发出去", "bad");
-});
-
-$("btnCloseSessions").addEventListener("click", function(){
-  $("sessionPanel").hidden = true;
 });
 
 $("btnDiag").addEventListener("click", function(){
@@ -1748,15 +1754,16 @@ $("btnDiag").addEventListener("click", function(){
   if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
   if (!Bridge.diag()) addSys("诊断请求没发出去", "bad");
 });
-$("pillBind").addEventListener("click", function(){
-  beacon("pill-bind-click");
+/* 点「🔗」展开会话面板：挂在这颗胶囊下面，展开时就重新识别一次最新的消息。 */
+$("pillBind").addEventListener("click", function(e){
+  e.stopPropagation();
+  beacon("pill-bind-click", "open=" + $("popBind").classList.contains("show"));
+  if ($("popBind").classList.contains("show")) { hidePops(); return; }
+  showPop("popBind");
+  refreshBindState();
   if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
-  if (boundTable || boundWho) {
-    if (Bridge.bind("", "")) addSys("正在解绑…");
-  } else {
-    $("sessionPanel").hidden = false;
-    if (!Bridge.listSessions()) addSys("请求没发出去", "bad");
-  }
+  $("sessionHint").textContent = "正在识别…";
+  if (!Bridge.listSessions()) addSys("请求没发出去：WebSocket 没打开", "bad");
 });
 
 $("btnPull").addEventListener("click", pullRecent);

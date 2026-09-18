@@ -47,7 +47,10 @@ function makeEl(tag){
     select(){},
     /* 记下监听器，click() 真去调 —— 否则按钮上的逻辑在测试里根本进不去 */
     addEventListener(type, fn){ (el._on[type] = el._on[type] || []).push(fn); },
-    click(){ (el._on.click || []).forEach(f => f.call(el)); },
+    click(){
+      const ev = { target: el, stopPropagation(){}, preventDefault(){} };
+      (el._on.click || []).forEach(f => f.call(el, ev));
+    },
     querySelector(){ return null; },
     querySelectorAll(){ return []; },
     setAttribute(){},
@@ -448,9 +451,10 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     sock.readyState = 1;
     sock.onopen();
 
-    $("btnListSessions").click();
+    $("pillBind").click();
+    check($("popBind").classList.contains("show"), "点 🔗 胶囊展开会话面板（挂在胶囊下面）");
     check(sock.sent.some(t => t.indexOf('"tables"') >= 0),
-          "点「选择会话」会向桥要 tables", JSON.stringify(sock.sent));
+          "展开时就去向桥要 tables", JSON.stringify(sock.sent));
 
     const list = [
       { table:"Msg_9e20f478899dc29eb19741386f9343c8", md5:"9e20f478899dc29eb19741386f9343c8",
@@ -467,13 +471,11 @@ const settle = () => new Promise(r => setTimeout(r, 60));
           rows.length + " 行");
     check(String($("sessionHint").textContent).indexOf("3") >= 0,
           "标题写清识别到几个", String($("sessionHint").textContent));
-    // 桩 DOM 的 textContent 不会从子节点聚合，所以直接看 body 的两个子节点
-    const row1 = rows[1].children[1].children;   // [对方, 最新消息正文]
+    const row1 = rows[1].children[1].children;   // [对方, 最新消息正文]（桩 DOM 不聚合 textContent）
     check(String(row1[0].textContent).indexOf("filehelper") >= 0,
           "第一条是 filehelper", String(row1[0].textContent));
     check(String(row1[1].textContent).indexOf("E2E1-K.") >= 0,
           "第一条带着它的最新消息正文", String(row1[1].textContent));
-    check($("sessionPanel").hidden === false, "面板是展开的");
 
     rows[2].click();
     check(sock.sent.some(t => t.indexOf('"bind"') >= 0 && t.indexOf("wxid_pno349onlek322") >= 0),
@@ -486,11 +488,11 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     check(String($("pillBind").textContent).indexOf("wxid_pno349onlek322") >= 0,
           "bound 回执让顶栏胶囊显示已绑定谁", String($("pillBind").textContent));
     check($("pillBind").classList.contains("ok"), "绑定后胶囊变绿");
-    check($("sessionPanel").hidden === true, "绑定后面板收起来");
+    check($("popBind").classList.contains("show") === false, "绑定后面板收起来");
 
     // 刷新按钮：再问一次（"重新识别最新的消息"）
     const before = sock.sent.length;
-    $("sessionPanel").hidden = false;
+    $("pillBind").click();          // 再展开一次
     $("btnRefreshSessions").click();
     check(sock.sent.length > before && sock.sent[sock.sent.length - 1].indexOf('"tables"') >= 0,
           "「🔄 刷新」会重新要一遍 tables");
