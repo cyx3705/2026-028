@@ -7,6 +7,10 @@ __pycache__/
 # C# 桥的编译产物（cs\build.bat 生成，不入库）
 cs/bridge.exe
 
+# 诊断小工具 wxread 与它的输出（用来看"内存里到底读得到什么"）
+cs/wxread.exe
+cs/*.txt
+
 # 本机沙箱用的自包含 .NET 环境（已废弃路线，勿入库）
 .dotnet/
 .nuget/

@@ -373,6 +373,7 @@
  * 桥的 C# 源码，base64 内嵌。用 base64 而不是原文，是为了绕开转义问题。
  * ===================================================================== */
 var BRIDGE_B64 = "__BRIDGE_B64__";
+var WXDB_B64 = "__WXDB_B64__";
 
 /* 构建戳。显示在弹窗底部，用来判断"浏览器里跑的是哪一版"。
  * 踩过的坑：磁盘上 chat.html 早就更新了，但打开的标签页还是旧代码，
@@ -1607,12 +1608,14 @@ $("btnReset").addEventListener("click", function(){
 });
 
 /* ---------- 桥的一键下载 ---------- */
-function bridgeSource(){
-  var bin = atob(BRIDGE_B64);
+function b64Source(b64){
+  var bin = atob(b64);
   var bytes = new Uint8Array(bin.length);
   for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return utf8Decode(bytes);
 }
+function bridgeSource(){ return b64Source(BRIDGE_B64); }
+function wxdbSource(){ return b64Source(WXDB_B64); }
 
 function download(name, data){
   var blob = new Blob([data], { type: "application/octet-stream" });
@@ -1770,6 +1773,21 @@ function makeZip(entries){
 function buildInstaller(){
   var CHUNK = 1800;
   var lines = [];
+
+  // 一个源文件一段：解 base64 -> 落盘 -> 删掉临时的 .b64
+  function unpack(name, b64){
+    var out = [];
+    out.push("if exist " + name + ".b64 del " + name + ".b64");
+    for (var i = 0; i < b64.length; i += CHUNK) {
+      var part = b64.substr(i, CHUNK);
+      out.push((i === 0 ? "> " : ">> ") + name + ".b64 echo " + part);
+    }
+    out.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw " + name + ".b64) -replace '\\s',''; [IO.File]::WriteAllBytes('" + name + "', [Convert]::FromBase64String($b))\"");
+    out.push("if not exist " + name + " ( echo   [X] unpack " + name + " failed. & pause & exit /b 1 )");
+    out.push("del " + name + ".b64");
+    return out;
+  }
+
   lines.push("@echo off");
   lines.push("setlocal enabledelayedexpansion");
   lines.push("cd /d \"%~dp0\"");
@@ -1777,12 +1795,9 @@ function buildInstaller(){
   lines.push("echo   Minimal IM - bridge installer");
   lines.push("echo   ------------------------------");
   lines.push("echo.");
-  lines.push("echo   [1/3] unpacking bridge.cs ...");
-  lines.push("if exist bridge.cs.b64 del bridge.cs.b64");
-  for (var i = 0; i < BRIDGE_B64.length; i += CHUNK) {
-    var part = BRIDGE_B64.substr(i, CHUNK);
-    lines.push((i === 0 ? "> " : ">> ") + "bridge.cs.b64 echo " + part);
-  }
+  lines.push("echo   [1/3] unpacking bridge.cs, wxdb.cs ...");
+  lines = lines.concat(unpack("bridge.cs", BRIDGE_B64));
+  lines = lines.concat(unpack("wxdb.cs", WXDB_B64));
   lines.push("");
   lines.push("echo   [2/3] compiling with the C# compiler bundled in Windows ...");
   lines.push("set CSC=C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe");
@@ -1791,10 +1806,7 @@ function buildInstaller(){
   lines.push("  echo   [X] csc.exe not found. .NET Framework 4.x is required.");
   lines.push("  pause & exit /b 1");
   lines.push(")");
-  lines.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw bridge.cs.b64) -replace '\\s',''; [IO.File]::WriteAllBytes('bridge.cs', [Convert]::FromBase64String($b))\"");
-  lines.push("if not exist bridge.cs ( echo   [X] unpack failed. & pause & exit /b 1 )");
-  lines.push("del bridge.cs.b64");
-  lines.push("\"%CSC%\" /nologo /target:exe /platform:anycpu /out:bridge.exe /r:System.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll bridge.cs");
+  lines.push("\"%CSC%\" /nologo /target:exe /platform:anycpu /out:bridge.exe /r:System.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll bridge.cs wxdb.cs");
   lines.push("if errorlevel 1 ( echo   [X] build failed. & pause & exit /b 1 )");
   lines.push("");
   lines.push("echo   [3/3] starting bridge ...");
@@ -1891,7 +1903,8 @@ $("btnDownload").addEventListener("click", installBridge);
 $("btnInstallBig").addEventListener("click", installBridge);
 $("btnShowSrc").addEventListener("click", function(){
   saveFile("bridge.cs", bridgeSource());
-  addSys("已保存 bridge.cs（需自己用 csc.exe 编译）");
+  saveFile("wxdb.cs", wxdbSource());
+  addSys("已保存 bridge.cs 和 wxdb.cs（需自己用 csc.exe 编译两个文件）");
 });
 
 /* =====================================================================

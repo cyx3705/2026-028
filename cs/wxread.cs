@@ -30,16 +30,39 @@ internal static class WxReadMain
     {
         Console.OutputEncoding = Encoding.UTF8;
         string mode = args.Length > 0 ? args[0] : "all";
+
+        // pid <n> [dbs|sessions|tables|...] -- capture some other Weixin process
+        // (helper processes own their own page caches; the window process is not
+        // necessarily the one that has a given database open).
+        int forcedPid = 0;
+        if (mode == "pid" && args.Length > 1)
+        {
+            forcedPid = int.Parse(args[1]);
+            mode = args.Length > 2 ? args[2] : "dbs";
+            string[] rest = new string[args.Length - 2];
+            Array.Copy(args, 2, rest, 0, rest.Length);
+            args = rest;
+        }
+
         StringBuilder sb = new StringBuilder();
         TextWriter w = mode == "all"
             ? (TextWriter)new StringWriter(sb)
             : Console.Out;
         try
         {
-            IntPtr h = WeChatWindow();
-            if (h == IntPtr.Zero) { w.WriteLine("找不到微信窗口"); return; }
-            uint pid = WxSnapshot.PidOfWeChatWindow(h);
-            w.WriteLine("微信窗口 0x{0:x} pid={1}", h.ToInt64(), pid);
+            uint pid;
+            if (forcedPid != 0)
+            {
+                pid = (uint)forcedPid;
+                w.WriteLine("指定 pid={0}", pid);
+            }
+            else
+            {
+                IntPtr h = WeChatWindow();
+                if (h == IntPtr.Zero) { w.WriteLine("找不到微信窗口"); return; }
+                pid = WxSnapshot.PidOfWeChatWindow(h);
+                w.WriteLine("微信窗口 0x{0:x} pid={1}", h.ToInt64(), pid);
+            }
 
             DateTime t0 = DateTime.Now;
             WxSnapshot snap = WxSnapshot.Capture((int)pid);
@@ -122,6 +145,361 @@ internal static class WxReadMain
                                     m.Sender, Clip(m.Text, 140));
                     }
                 }
+            }
+
+            if (mode == "pagers")
+            {
+                string note;
+                List<string> ls = WxSnapshot.PagerReport((int)pid, out note);
+                w.WriteLine(note + "，pager " + ls.Count + " 个");
+                foreach (string s in ls) w.WriteLine("  " + s);
+            }
+
+            // fresh -- 每张消息表在各修订版里能读到的最新一行，用来判断
+            // "读不到"是页缓存没覆盖，还是我们挑错了修订版。
+            if (mode == "fresh")
+            {
+                Dictionary<string, string> names = new Dictionary<string, string>();
+                foreach (WxSession s in snap.Sessions())
+                    names[WxSnapshot.Md5Hex(s.UserName)] = s.UserName;
+
+                Dictionary<string, long> bestTime = new Dictionary<string, long>();
+                Dictionary<string, string> bestLine = new Dictionary<string, string>();
+                int total = 0;
+                foreach (WxDb db in snap.Dbs)
+                {
+                    Dictionary<string, int> t;
+                    try { t = db.Tables(); }
+                    catch { continue; }
+                    foreach (KeyValuePair<string, int> kv in t)
+                    {
+                        if (!WxSnapshot.IsMsgTable(kv.Key)) continue;
+                        total++;
+                        long newest = 0;
+                        int n = 0;
+                        try
+                        {
+                            foreach (SqlRow r in db.TailRows(kv.Value, 4))
+                            {
+                                n++;
+                                object[] v = r.Values;
+                                if (v.Length == 17)
+                                {
+                                    long ct = L(v[5]);
+                                    if (ct > newest) newest = ct;
+                                }
+                            }
+                        }
+                        catch { }
+                        long prev;
+                        if (bestTime.TryGetValue(kv.Key, out prev) && prev >= newest)
+                            continue;
+                        bestTime[kv.Key] = newest;
+                        string u;
+                        if (!names.TryGetValue(kv.Key.Substring(4), out u))
+                            u = "(会话表里没有)";
+                        bestLine[kv.Key] = string.Format(
+                            "[{0}] {1} {2,-32} 库 DbPages={3,-6} change={4,-12} 行={5}",
+                            Time(newest), kv.Key, u, db.DbPages, db.ChangeCounter, n);
+                    }
+                }
+                List<KeyValuePair<string, long>> order =
+                    new List<KeyValuePair<string, long>>(bestTime);
+                order.Sort(delegate (KeyValuePair<string, long> a,
+                                     KeyValuePair<string, long> b)
+                {
+                    return b.Value.CompareTo(a.Value);
+                });
+                w.WriteLine("\n== 消息表 {0} 张（跨修订版取最新），最新 30 ==", total);
+                for (int i = 0; i < order.Count && i < 30; i++)
+                    w.WriteLine(bestLine[order[i].Key]);
+                if (order.Count > 30)
+                    w.WriteLine("  … 其余 {0} 张更旧", order.Count - 30);
+            }
+
+            // find <text> -- 在整份内存镜像里找一段文字，并指出它落在哪个页
+            // 缓存/哪一页；落不进任何页缓存就说明它不是 SQLite 页里的数据。
+            if (mode == "find" && args.Length > 1)
+            {
+                byte[] pat = Encoding.UTF8.GetBytes(args[1]);
+                byte[] d = snap.Img.Data;
+                Dictionary<int, string> owners = WxSnapshot.PageOwners(snap.Img);
+                int[] keys = new int[owners.Count];
+                owners.Keys.CopyTo(keys, 0);
+                Array.Sort(keys);
+                int hits = 0;
+                for (int i = 0; i + pat.Length <= d.Length && hits < 30; i++)
+                {
+                    bool ok = true;
+                    for (int j = 0; j < pat.Length; j++)
+                        if (d[i + j] != pat[j]) { ok = false; break; }
+                    if (!ok) continue;
+                    hits++;
+                    w.WriteLine("命中#{0} 镜像偏移={1} 页内偏移={2}", hits, i,
+                                i % WxDb.PageSize);
+                    int s = i - 80; if (s < 0) s = 0;
+                    int e = i + pat.Length + 80; if (e > d.Length) e = d.Length;
+                    w.WriteLine("   上下文: {0}", Clip(Text(d, s, e), 260));
+                    int k = Array.BinarySearch(keys, i);
+                    if (k < 0) k = ~k - 1;
+                    if (k >= 0 && i < keys[k] + WxDb.PageSize)
+                        w.WriteLine("   页: 页数据偏移={0} -> {1}", keys[k], owners[keys[k]]);
+                    else
+                        w.WriteLine("   页: 不在任何页缓存里（页数据偏移 {0}）",
+                                    k >= 0 ? keys[k].ToString() : "无");
+                }
+                w.WriteLine("共 {0} 处（最多显示 30）", hits);
+            }
+
+            // leaf <表名> -- 每个页池里根页号、最右叶子页号、以及那页上的行
+            if (mode == "leaf" && args.Length > 1)
+            {
+                int root;
+                List<WxDb> pools = snap.PoolsWithTable(args[1], out root);
+                w.WriteLine("表 {0} 根页={1}，页池 {2} 个", args[1], root, pools.Count);
+                foreach (WxDb db in pools)
+                {
+                    int[] lp = db.RightmostLeaf(root);
+                    List<SqlRow> rows = db.TailRows(root, 40);
+                    w.WriteLine("  池 DbPages={0} cc={1} 缓存页={2} 缺={3} 最右叶={4} 行={5}",
+                                db.DbPages, db.ChangeCounter, db.PageOff.Count,
+                                db.MissingCount,
+                                lp == null ? "无" : lp[0].ToString(), rows.Count);
+                    foreach (SqlRow r in rows)
+                    {
+                        object[] v = r.Values;
+                        w.WriteLine("      rowid={0} t={1} type={2} {3}", r.RowId,
+                                    v.Length == 17 ? Time(L(v[5])) : "?",
+                                    v.Length == 17 ? v[2] : null,
+                                    v.Length == 17 ? Clip(Convert.ToString(v[12]), 60) : "");
+                    }
+                }
+            }
+
+            // page <页号> -- 把该页当叶子页解析，看里面是谁的行
+            if (mode == "page" && args.Length > 1)
+            {
+                int pg = int.Parse(args[1]);
+                foreach (WxDb db in snap.Dbs)
+                {
+                    if (!db.PageOff.ContainsKey(pg)) continue;
+                    int pt = db.PageType(pg);
+                    w.WriteLine("页 {0} 在 DbPages={1} cc={2} 类型={3} 缓存页={4}",
+                                pg, db.DbPages, db.ChangeCounter, pt, db.PageOff.Count);
+                    if (pt == 5 || pt == 2)
+                    {
+                        List<int> kids = db.ChildrenOf(pg);
+                        StringBuilder kb = new StringBuilder();
+                        foreach (int c in kids) kb.Append(c).Append(' ');
+                        w.WriteLine("   孩子: {0}", kb.ToString());
+                        continue;
+                    }
+                    List<SqlRow> rows = db.PageRows(pg);
+                    w.WriteLine("   行={0}", rows.Count);
+                    foreach (SqlRow r in rows)
+                    {
+                        object[] v = r.Values;
+                        StringBuilder line = new StringBuilder();
+                        for (int i = 0; i < v.Length; i++)
+                        {
+                            if (i > 0) line.Append(" | ");
+                            line.Append(i).Append('=').Append(Fmt(v[i]));
+                        }
+                        w.WriteLine("   rowid={0} {1}", r.RowId, Clip(line.ToString(), 300));
+                    }
+                }
+            }
+
+            // findpage <页号> -- 在整份镜像里找"最右孩子是这一页"的内部页，
+            // 也就是绕过页缓存枚举，直接看这一页的父亲在不在内存里。
+            if (mode == "findpage" && args.Length > 1)
+            {
+                int want = int.Parse(args[1]);
+                byte[] d = snap.Img.Data;
+                Dictionary<int, string> owners = WxSnapshot.PageOwners(snap.Img);
+                int[] keys = new int[owners.Count];
+                owners.Keys.CopyTo(keys, 0);
+                Array.Sort(keys);
+                byte b0 = (byte)(want >> 24), b1 = (byte)(want >> 16),
+                     b2 = (byte)(want >> 8), b3 = (byte)want;
+                int hits = 0;
+                for (int o = 8; o + 12 < d.Length; o++)
+                {
+                    if (d[o + 3] != b3 || d[o + 2] != b2 || d[o + 1] != b1 ||
+                        d[o] != b0) continue;
+                    int st = o - 8;
+                    byte t = d[st];
+                    if (t != 2 && t != 5 && t != 10 && t != 13) continue;
+                    int ncell = (d[st + 3] << 8) | d[st + 4];
+                    if (ncell == 0 || ncell > 1500) continue;
+                    hits++;
+                    int k = Array.BinarySearch(keys, st);
+                    if (k < 0) k = ~k - 1;
+                    string own = (k >= 0 && st < keys[k] + WxDb.PageSize)
+                                 ? owners[keys[k]] : "不在任何页缓存里";
+                    w.WriteLine("镜像偏移={0} 类型={1} 单元={2} -> {3}", st, t, ncell, own);
+                    if (hits >= 20) break;
+                }
+                w.WriteLine("共 {0} 处", hits);
+            }
+
+            // pagescan [low] [high] -- 全镜像扫"长得像 SQLite 页"的缓冲区，
+            // 看看除了页缓存之外，内存里还散落着哪些页（新的内部页就在其中）。
+            if (mode == "pagescan")
+            {
+                int low = args.Length > 1 ? int.Parse(args[1]) : 1;
+                int high = args.Length > 2 ? int.Parse(args[2]) : 400000;
+                byte[] d = snap.Img.Data;
+                Dictionary<int, string> owners = WxSnapshot.PageOwners(snap.Img);
+                int[] keys = new int[owners.Count];
+                owners.Keys.CopyTo(keys, 0);
+                Array.Sort(keys);
+                int total = 0, reg = 0;
+                for (int o = 0; o + 4096 <= d.Length; o++)
+                {
+                    byte t = d[o];
+                    if (t != 2 && t != 5 && t != 10 && t != 13) continue;
+                    int ncell = (d[o + 3] << 8) | d[o + 4];
+                    if (ncell == 0 || ncell > 1500) continue;
+                    int cs = (d[o + 5] << 8) | d[o + 6];
+                    if (cs == 0) cs = 65536;
+                    if (cs < 8 + 2 * ncell || cs > 4097) continue;
+                    total++;
+                    int k = Array.BinarySearch(keys, o);
+                    if (k < 0) k = ~k - 1;
+                    bool inside = (k >= 0 && o < keys[k] + WxDb.PageSize);
+                    if (inside) reg++;
+                    if (t != 2 && t != 5) continue;
+                    int rm = (d[o + 8] << 24) | (d[o + 9] << 16) |
+                             (d[o + 10] << 8) | d[o + 11];
+                    if (rm < low || rm > high) continue;
+                    w.WriteLine("偏移={0} 类型={1} 单元={2} 最右孩子={3} {4}", o, t, ncell,
+                                rm, inside ? "[" + owners[keys[k]] + "]" : "[不在页缓存]");
+                }
+                w.WriteLine("页形状缓冲 {0} 个，其中落在页缓存里 {1} 个", total, reg);
+            }
+
+            // hex <偏移> [字节数] -- 看一段原始内存（找那些"页形状缓冲"的来历）
+            if (mode == "hex" && args.Length > 1)
+            {
+                int o = int.Parse(args[1]);
+                int n = args.Length > 2 ? int.Parse(args[2]) : 256;
+                byte[] d = snap.Img.Data;
+                for (int i = 0; i < n; i += 16)
+                {
+                    if (o + i + 16 > d.Length) break;
+                    StringBuilder hx = new StringBuilder();
+                    StringBuilder tx = new StringBuilder();
+                    for (int j = 0; j < 16; j++)
+                    {
+                        byte b = d[o + i + j];
+                        hx.Append(b.ToString("x2")).Append(' ');
+                        tx.Append(b >= 0x20 && b < 0x7F ? (char)b : '.');
+                    }
+                    w.WriteLine("{0:x8}  {1} {2}", o + i, hx.ToString(), tx.ToString());
+                }
+            }
+
+            // fresh2 <表名> -- 单次抓取内自洽地找"更新的内部页副本"：页缓存里
+            // 的根页往往停在旧的孩子列表上，内存里却散落着同一页的新副本
+            // （最右孩子更大）。这里按"孩子集合重合度"把它们认出来。
+            if (mode == "fresh2" && args.Length > 1)
+            {
+                int root;
+                List<WxDb> pools = snap.PoolsWithTable(args[1], out root);
+                w.WriteLine("表 {0} 根页={1}，页池 {2} 个", args[1], root, pools.Count);
+                HashSet<int> known = new HashSet<int>();
+                foreach (WxDb db in pools)
+                    foreach (int c in db.ChildrenOf(root)) known.Add(c);
+                int kmax = 0;
+                foreach (int c in known) if (c > kmax) kmax = c;
+                w.WriteLine("页缓存里的根页孩子 {0} 个，最大 {1}", known.Count, kmax);
+                byte[] d = snap.Img.Data;
+                int best = -1, bestMax = 0, bestOv = 0, bestCells = 0;
+                for (int o = 0; o + 4096 <= d.Length; o++)
+                {
+                    byte t = d[o];
+                    if (t != 5) continue;
+                    byte[] pg = new byte[4096];
+                    Buffer.BlockCopy(d, o, pg, 0, 4096);
+                    List<int> kids = WxDb.ChildrenOfPage(pg, 0);
+                    if (kids.Count < 3) continue;
+                    int ov = 0, mx = 0;
+                    foreach (int c in kids)
+                    {
+                        if (known.Contains(c)) ov++;
+                        if (c > mx) mx = c;
+                    }
+                    if (ov < 3) continue;
+                    if (ov * 2 < known.Count) continue;      // 至少认得出半数
+                    if (mx <= kmax) continue;
+                    if (mx > bestMax) { best = o; bestMax = mx; bestOv = ov; bestCells = kids.Count; }
+                }
+                if (best < 0) w.WriteLine("没有找到更新的根页副本");
+                else
+                    w.WriteLine("更新副本: 偏移={0} 单元={1} 重合={2} 最大孩子={3}",
+                                best, bestCells, bestOv, bestMax);
+            }
+
+            // probe <表名> -- 用严格页校验在整块内存里找这张表的"最新叶子"：
+            // 先找与缓存里根页孩子集合重合最多的合法内部页（同一页的新副本），
+            // 再用它最后一个单元的 rowid 去认那张新叶子。
+            if (mode == "probe" && args.Length > 1)
+            {
+                int root;
+                List<WxDb> pools = snap.PoolsWithTable(args[1], out root);
+                HashSet<int> known = new HashSet<int>();
+                foreach (WxDb db in pools)
+                    foreach (int c in db.ChildrenOf(root)) known.Add(c);
+                w.WriteLine("表 {0} 根页={1} 页池={2} 缓存里根页孩子={3} 个",
+                            args[1], root, pools.Count, known.Count);
+                byte[] d = snap.Img.Data;
+                int bestO = -1, bestOv = 0, bestN = 0;
+                for (int o = 0; o + WxDb.PageSize <= d.Length; o++)
+                {
+                    if (d[o] != 5) continue;
+                    int type, ncell, cstart, pc0;
+                    if (!WxDb.StrictPage(d, o, out type, out ncell, out cstart, out pc0))
+                        continue;
+                    List<long[]> cells = WxDb.InteriorCells(d, o);
+                    if (cells.Count < 8) continue;
+                    int ov = 0;
+                    foreach (long[] c in cells)
+                        if (c[0] > 0 && c[0] < 400000 && known.Contains((int)c[0])) ov++;
+                    if (ov < 8 || ov * 2 < known.Count) continue;
+                    if (ov > bestOv) { bestO = o; bestOv = ov; bestN = cells.Count; }
+                }
+                if (bestO < 0) { w.WriteLine("没找到与缓存根页吻合的合法内部页"); return; }
+                List<long[]> bc = WxDb.InteriorCells(d, bestO);
+                w.WriteLine("最佳内部页：偏移={0} 单元={1} 重合={2}", bestO, bestN, bestOv);
+                w.WriteLine("   最后 6 个单元（孩子, 该子树最大 rowid）:");
+                for (int i = Math.Max(0, bc.Count - 6); i < bc.Count; i++)
+                    w.WriteLine("      child={0} maxRowid={1}", bc[i][0], bc[i][1]);
+                long want = bc[bc.Count - 1][1];
+                w.WriteLine("   找 maxRowid={0} 的合法叶子页：", want);
+                int found = 0;
+                for (int o = 0; o + WxDb.PageSize <= d.Length; o++)
+                {
+                    if (d[o] != 13) continue;
+                    int type, ncell, cstart, pc0;
+                    if (!WxDb.StrictPage(d, o, out type, out ncell, out cstart, out pc0))
+                        continue;
+                    List<SqlRow> rows = pools[0].RowsAt(d, o, 1885);
+                    if (rows.Count == 0) continue;
+                    long mx = 0;
+                    foreach (SqlRow r in rows) if (r.RowId > mx) mx = r.RowId;
+                    if (mx != want) continue;
+                    found++;
+                    w.WriteLine("   命中叶子 偏移={0} 行={1}", o, rows.Count);
+                    foreach (SqlRow r in rows)
+                    {
+                        object[] v = r.Values;
+                        if (v.Length != 17) continue;
+                        w.WriteLine("      rowid={0} t={1} type={2} {3}", r.RowId,
+                                    Time(L(v[5])), v[2], Clip(Convert.ToString(v[12]), 70));
+                    }
+                }
+                w.WriteLine("   共 {0} 张", found);
             }
 
             if (mode == "msgs" && args.Length > 1)
@@ -207,6 +585,26 @@ internal static class WxReadMain
                 Console.WriteLine("已写入 wxread_out.txt ({0} 字节)", sb.Length);
             }
         }
+    }
+
+    private static string Text(byte[] d, int s, int e)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int i = s; i < e; i++)
+        {
+            byte b = d[i];
+            if (b >= 0x20 && b < 0x7F) sb.Append((char)b);
+            else if (b >= 0x80) sb.Append((char)b);   // CJK 会看着像乱码，够用了
+            else sb.Append(' ');
+        }
+        return sb.ToString();
+    }
+
+    private static long L(object o)
+    {
+        if (o is long) return (long)o;
+        if (o is int) return (int)o;
+        return 0;
     }
 
     private static string Fmt(object v)

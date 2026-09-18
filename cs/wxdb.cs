@@ -284,10 +284,15 @@ namespace LocalChat
                 }
                 else if (t == 5 || t == 2)
                 {
+                    // 内部页的头部多一个 4 字节"最右孩子"指针（hdr+8..11），
+                    // 单元指针数组从 hdr+12 开始；叶子页才是 hdr+8。原来统一
+                    // 按 hdr+8 读，内部页的指针全错位四字节。
                     int ncell = (page[hdr + 3] << 8) | page[hdr + 4];
                     for (int i = 0; i < ncell; i++)
                     {
-                        int p = (page[hdr + 8 + 2 * i] << 8) | page[hdr + 9 + 2 * i];
+                        int pp = hdr + 12 + 2 * i;
+                        if (pp + 2 > PageSize) break;
+                        int p = (page[pp] << 8) | page[pp + 1];
                         if (p + 4 > PageSize) continue;
                         int child = (page[p] << 24) | (page[p + 1] << 16) |
                                     (page[p + 2] << 8) | page[p + 3];
@@ -367,6 +372,111 @@ namespace LocalChat
             return all;
         }
 
+        /// <summary>
+        /// 严格校验：把 <paramref name="d"/> 的 <paramref name="off"/> 处当成一个
+        /// SQLite b-tree 页来验。单元指针必须全部落在 [cellstart, 4096) 内、
+        /// 互不相同，并且最小的那个正好等于 cellstart（SQLite 从 cellstart
+        /// 往上连续堆放单元）。随机数据几乎不可能同时满足，所以这个校验可以
+        /// 用来在整块内存里认出"真的页"，不必依赖 pcache 的 PgHdr1 版式。
+        /// </summary>
+        public static bool StrictPage(byte[] d, int off, out int type, out int ncell,
+                                      out int cstart, out int pc0)
+        {
+            type = d[off];
+            ncell = 0; cstart = 0; pc0 = 0;
+            if (type != 2 && type != 5 && type != 10 && type != 13) return false;
+            ncell = (d[off + 3] << 8) | d[off + 4];
+            if (ncell == 0 || ncell > 1200) return false;
+            cstart = (d[off + 5] << 8) | d[off + 6];
+            if (cstart == 0) cstart = 65536;
+            pc0 = (type == 2 || type == 5) ? 12 : 8;
+            if (cstart < pc0 + 2 * ncell || cstart > 4097) return false;
+            int minp = 65536;
+            HashSet<int> seen = new HashSet<int>();
+            for (int i = 0; i < ncell; i++)
+            {
+                int pp = off + pc0 + 2 * i;
+                int p = (d[pp] << 8) | d[pp + 1];
+                if (p < cstart || p + 4 > PageSize) return false;
+                if (!seen.Add(p)) return false;
+                if (p < minp) minp = p;
+            }
+            if (cstart != 65536 && minp != cstart) return false;
+            return true;
+        }
+
+        /// <summary>内部页的 (孩子页号, 该子树最大 rowid) 列表。</summary>
+        public static List<long[]> InteriorCells(byte[] d, int off)
+        {
+            List<long[]> cells = new List<long[]>();
+            int type, ncell, cstart, pc0;
+            if (!StrictPage(d, off, out type, out ncell, out cstart, out pc0)) return cells;
+            if (type != 2 && type != 5) return cells;
+            for (int i = 0; i < ncell; i++)
+            {
+                int pp = off + pc0 + 2 * i;
+                int p = off + ((d[pp] << 8) | d[pp + 1]);
+                long child = ((long)d[p] << 24) | ((long)d[p + 1] << 16) |
+                             ((long)d[p + 2] << 8) | d[p + 3];
+                // 表内部页的单元 = 4 字节孩子页号 + varint(rowid)，
+                // 这个 rowid 就是该子树里的最大 rowid。
+                long key = 0;
+                for (int k = 0; k < 9; k++)
+                {
+                    byte c = d[p + 4 + k];
+                    if (k == 8) { key = (key << 8) + c; break; }
+                    key = (key << 7) + (long)(c & 0x7F);
+                    if ((c & 0x80) == 0) break;
+                }
+                cells.Add(new long[] { child, key });
+            }
+            // 最右孩子没有 key，需要用父页自己的上限，调用方另行处理
+            return cells;
+        }
+
+        /// <summary>把内存里任意偏移的一个叶子页解析成行（诊断/兜底用）。</summary>
+        public List<SqlRow> RowsAt(byte[] d, int off, int pgno)
+        {
+            byte[] page = new byte[PageSize];
+            Buffer.BlockCopy(d, off, page, 0, PageSize);
+            return LeafCellRows(page, (pgno == 1) ? 100 : 0, pgno);
+        }
+
+        /// <summary>表叶子页里 rowid 的最小值/最大值（用来认页）。</summary>
+        public static bool LeafRowIds(byte[] d, int off, out long min, out long max)
+        {
+            min = long.MaxValue; max = long.MinValue;
+            int type, ncell, cstart, pc0;
+            if (!StrictPage(d, off, out type, out ncell, out cstart, out pc0)) return false;
+            if (type != 13) return false;
+            for (int i = 0; i < ncell; i++)
+            {
+                int pp = off + pc0 + 2 * i;
+                int p = off + ((d[pp] << 8) | d[pp + 1]);
+                int j = 0;
+                long plen = 0;
+                for (int k = 0; k < 9; k++)
+                {
+                    byte c = d[p + j];
+                    if (k == 8) { plen = (plen << 8) + c; j++; break; }
+                    plen = (plen << 7) + (long)(c & 0x7F);
+                    j++;
+                    if ((c & 0x80) == 0) break;
+                }
+                long rowid = 0;
+                for (int k = 0; k < 9; k++)
+                {
+                    byte c = d[p + j + k];
+                    if (k == 8) { rowid = (rowid << 8) + c; break; }
+                    rowid = (rowid << 7) + (long)(c & 0x7F);
+                    if ((c & 0x80) == 0) break;
+                }
+                if (rowid < min) min = rowid;
+                if (rowid > max) max = rowid;
+            }
+            return min <= max;
+        }
+
         /// <summary>All rows of the table whose b-tree starts at <paramref name="root"/>.</summary>
         public List<SqlRow> TableRows(int root)
         {
@@ -378,6 +488,63 @@ namespace LocalChat
                 rows.AddRange(LeafCellRows(page, lp[1], lp[0]));
             }
             return rows;
+        }
+
+        /// <summary>
+        /// 诊断用：把某一页当表叶子页解析，不问它属于哪张表 —— 用来确认
+        /// "某个页面里到底是不是我们要的那些行"。
+        /// </summary>
+        public List<SqlRow> PageRows(int pgno)
+        {
+            byte[] page = Page(pgno);
+            if (page == null) return new List<SqlRow>();
+            int hdr = (pgno == 1) ? 100 : 0;
+            byte t = page[hdr];
+            if (t != 13 && t != 10) return new List<SqlRow>();
+            return LeafCellRows(page, hdr, pgno);
+        }
+
+        /// <summary>诊断用：页类型（2/5 内部页，10/13 叶子页，-1 不在缓存里）。</summary>
+        public int PageType(int pgno)
+        {
+            byte[] page = Page(pgno);
+            if (page == null) return -1;
+            return page[(pgno == 1) ? 100 : 0];
+        }
+
+        /// <summary>诊断用：内部页的孩子页号（含最右孩子）；不是内部页返回空。</summary>
+        public List<int> ChildrenOf(int pgno)
+        {
+            List<int> kids = new List<int>();
+            byte[] page = Page(pgno);
+            if (page == null) return kids;
+            return ChildrenOfPage(page, (pgno == 1) ? 100 : 0);
+        }
+
+        /// <summary>
+        /// 内部页的孩子页号。内部页头部：+8 是 4 字节最右孩子指针，+12 起才是
+        /// 单元指针数组（叶子页没有那个指针，数组从 +8 开始）。
+        /// </summary>
+        public static List<int> ChildrenOfPage(byte[] page, int hdr)
+        {
+            List<int> kids = new List<int>();
+            byte t = page[hdr];
+            if (t != 5 && t != 2) return kids;
+            int ncell = (page[hdr + 3] << 8) | page[hdr + 4];
+            for (int i = 0; i < ncell; i++)
+            {
+                int pp = hdr + 12 + 2 * i;
+                if (pp + 2 > PageSize) break;
+                int p = (page[pp] << 8) | page[pp + 1];
+                if (p + 4 > PageSize) continue;
+                int c = (page[p] << 24) | (page[p + 1] << 16) |
+                        (page[p + 2] << 8) | page[p + 3];
+                if (c > 0) kids.Add(c);
+            }
+            int rm = (page[hdr + 8] << 24) | (page[hdr + 9] << 16) |
+                     (page[hdr + 10] << 8) | page[hdr + 11];
+            if (rm > 0) kids.Add(rm);
+            return kids;
         }
 
         /// <summary>Rows of sqlite_master: type, name, tbl_name, rootpage, sql.</summary>
@@ -440,12 +607,98 @@ namespace LocalChat
         public bool Compressed;
     }
 
+    /// <summary>
+    /// 内存里"真的 SQLite 页"的索引 —— 不依赖 pcache 的 PgHdr1 版式。
+    ///
+    /// 为什么需要它：WeChat 用 SQLCipher，页解密后落在页缓存里，我们靠
+    /// PgHdr1 结构能把那些页捞出来；但最新写入的那几页常常**不在**任何
+    /// 页缓存里（连接提交后页就被换出/释放了），只以零散的页映像留在内存
+    /// 别处。实测：会话表停在几小时前，消息表整个对话一行都读不出来。
+    /// 用严格页校验在整块内存里扫一遍，就能把这些页映像一并收进来。
+    /// </summary>
+    public sealed class MemPageIndex
+    {
+        /// <summary>内部页：偏移 + 孩子页号 + 每个孩子的最大 rowid + 最右孩子。</summary>
+        public sealed class Interior
+        {
+            public int Off;
+            public int Right;
+            public int[] Children;
+            public long[] Keys;
+        }
+
+        /// <summary>表叶子页：偏移 + rowid 范围（rowid 范围用来认页）。</summary>
+        public sealed class Leaf
+        {
+            public int Off;
+            public long Min;
+            public long Max;
+        }
+
+        public List<Interior> Interiors = new List<Interior>();
+        public List<Leaf> Leaves = new List<Leaf>();
+        public int Scanned;
+
+        public static MemPageIndex Build(byte[] d)
+        {
+            MemPageIndex ix = new MemPageIndex();
+            for (int o = 0; o + WxDb.PageSize <= d.Length; o++)
+            {
+                byte t = d[o];
+                if (t != 2 && t != 5 && t != 10 && t != 13) continue;
+                int type, ncell, cstart, pc0;
+                if (!WxDb.StrictPage(d, o, out type, out ncell, out cstart, out pc0))
+                    continue;
+                ix.Scanned++;
+                if (type == 2 || type == 5)
+                {
+                    List<long[]> cells = WxDb.InteriorCells(d, o);
+                    if (cells.Count == 0) continue;
+                    Interior it = new Interior();
+                    it.Off = o;
+                    it.Right = (d[o + 8] << 24) | (d[o + 9] << 16) |
+                               (d[o + 10] << 8) | d[o + 11];
+                    it.Children = new int[cells.Count];
+                    it.Keys = new long[cells.Count];
+                    for (int i = 0; i < cells.Count; i++)
+                    {
+                        it.Children[i] = (int)cells[i][0];
+                        it.Keys[i] = cells[i][1];
+                    }
+                    ix.Interiors.Add(it);
+                }
+                else if (type == 13)
+                {
+                    long mn, mx;
+                    if (!WxDb.LeafRowIds(d, o, out mn, out mx)) continue;
+                    Leaf lf = new Leaf();
+                    lf.Off = o;
+                    lf.Min = mn;
+                    lf.Max = mx;
+                    ix.Leaves.Add(lf);
+                }
+            }
+            return ix;
+        }
+    }
+
     /// <summary>Everything readable from WeChat's live memory at one instant.</summary>
     public sealed class WxSnapshot
     {
         public List<WxDb> Dbs = new List<WxDb>();
         public MemImage Img;
         public string Note = "";
+        private MemPageIndex _index;
+
+        /// <summary>整块内存里的"真页"索引，第一次用到时才扫。</summary>
+        public MemPageIndex PageIndex
+        {
+            get
+            {
+                if (_index == null && Img != null) _index = MemPageIndex.Build(Img.Data);
+                return _index;
+            }
+        }
 
         private static readonly byte[] SqliteMagic =
             Encoding.ASCII.GetBytes("SQLite format 3\0");
@@ -502,6 +755,79 @@ namespace LocalChat
             catch { }
             s.Note = note + "；其它 Weixin 进程里也没有页缓存";
             return s;
+        }
+
+        /// <summary>
+        /// 诊断用（wxread pagers）：列出进程里每一个页缓存，以及它第 1 页所
+        /// 描述的库身份 —— 也就是分组之前的样子。用来回答"某张表的页压根不在
+        /// 内存里"，还是"在，但被 GroupDatabases 归到别的库去了"。
+        /// </summary>
+        public static List<string> PagerReport(int pid, out string note,
+                                               out Dictionary<int, string> owner)
+        {
+            List<string> lines = new List<string>();
+            owner = new Dictionary<int, string>();
+            MemImage img = ReadMemory(pid);
+            if (img == null) { note = "读取内存失败"; return lines; }
+            note = string.Format("内存 {0:F1} MB / {1} 区域", img.Data.Length / 1048576.0,
+                                 img.RegionCount);
+            Dictionary<long, Dictionary<int, int>> pagers = EnumeratePageCache(img);
+            List<string> rows = new List<string>();
+            foreach (KeyValuePair<long, Dictionary<int, int>> kv in pagers)
+            {
+                int o, dbsz = 0, maxpg = 0;
+                long cc = -1;
+                bool p1 = kv.Value.TryGetValue(1, out o) &&
+                          o + 32 <= img.Data.Length &&
+                          MatchAt(img.Data, o, SqliteMagic);
+                if (p1) { dbsz = (int)BE32(img.Data, o + 28); cc = BE32(img.Data, o + 24); }
+                foreach (KeyValuePair<int, int> pg in kv.Value)
+                {
+                    if (pg.Key > maxpg) maxpg = pg.Key;
+                    string prev;
+                    string tag = string.Format("pCache=0x{0:x} pgno={1} dbsz={2} cc={3}",
+                                               kv.Key, pg.Key, dbsz, cc);
+                    if (owner.TryGetValue(pg.Value, out prev)) owner[pg.Value] = prev + " | " + tag;
+                    else owner[pg.Value] = tag;
+                }
+                rows.Add(string.Format(
+                    "pCache=0x{0,-12:x} 页={1,-5} maxpg={2,-6} 有第1页={3,-6} dbsz={4,-6} cc={5}",
+                    kv.Key, kv.Value.Count, maxpg, p1 ? "是" : "否", dbsz, cc));
+            }
+            rows.Sort(StringComparer.Ordinal);
+            lines.AddRange(rows);
+            return lines;
+        }
+
+        public static List<string> PagerReport(int pid, out string note)
+        {
+            Dictionary<int, string> unused;
+            return PagerReport(pid, out note, out unused);
+        }
+
+        /// <summary>诊断用：页数据在镜像里的偏移 -> 归属的页缓存与页号。</summary>
+        public static Dictionary<int, string> PageOwners(MemImage img)
+        {
+            Dictionary<long, Dictionary<int, int>> pagers = EnumeratePageCache(img);
+            Dictionary<int, string> owner = new Dictionary<int, string>();
+            foreach (KeyValuePair<long, Dictionary<int, int>> kv in pagers)
+            {
+                int o, dbsz = 0;
+                long cc = -1;
+                bool p1 = kv.Value.TryGetValue(1, out o) &&
+                          o + 32 <= img.Data.Length &&
+                          MatchAt(img.Data, o, SqliteMagic);
+                if (p1) { dbsz = (int)BE32(img.Data, o + 28); cc = BE32(img.Data, o + 24); }
+                foreach (KeyValuePair<int, int> pg in kv.Value)
+                {
+                    string tag = string.Format("pCache=0x{0:x} pgno={1} dbsz={2} cc={3}",
+                                               kv.Key, pg.Key, dbsz, cc);
+                    string prev;
+                    if (owner.TryGetValue(pg.Value, out prev)) owner[pg.Value] = prev + " | " + tag;
+                    else owner[pg.Value] = tag;
+                }
+            }
+            return owner;
         }
 
         private static MemImage ReadMemory(int pid)
@@ -794,32 +1120,27 @@ namespace LocalChat
 
         public List<WxSession> Sessions()
         {
-            // 会话表往往只缓存了一部分页：实测同一个 session.db 的不同连接
-            // 缓存的是不同修订版，只挑"最新修订版"反而只读得到 53 个会话，
-            // 而实际上有一百五十多个 —— 于是"最近有动静"的判断就不可靠了。
+            // 会话表的页缓存同样是"一个连接一份、快慢不一"：按 change counter
+            // 挑"最新修订版"反而会挑到旧的那一份 —— 实测同一次抓取里
+            // cc=3639721513 的那版把 TT 停在 17:14，而 cc=1166134073 的那版
+            // 界面上已经是 22:31。change counter 只是连接自己缓存里的
+            // page 1 副本，不能当新鲜度用。
             //
-            // 所以把每个含 SessionTable 的库都读一遍，同一个 username 取
-            // change counter 最大的那一版：既补上覆盖，又保证是新鲜的。
-            List<WxDb> sorted = new List<WxDb>(Dbs);
-            sorted.Sort(delegate (WxDb a, WxDb b)
-            {
-                return b.ChangeCounter.CompareTo(a.ChangeCounter);
-            });
+            // 改成每一版都读一遍，同一个 username 取 last_timestamp 最大的
+            // 那一行：时间戳本身就是新鲜度的证据。
             Dictionary<string, WxSession> byName = new Dictionary<string, WxSession>();
-            foreach (WxDb db in sorted)
+            foreach (WxDb db in Dbs)
             {
+                Dictionary<string, int> t;
                 int root;
-                try
-                {
-                    if (!db.Tables().TryGetValue("SessionTable", out root)) continue;
-                }
+                try { t = db.Tables(); }
                 catch { continue; }
+                if (!t.TryGetValue("SessionTable", out root)) continue;
                 foreach (SqlRow r in db.TableRows(root))
                 {
                     object[] v = r.Values;
                     if (v.Length < 19 || !(v[0] is string)) continue;
                     string u = (string)v[0];
-                    if (byName.ContainsKey(u)) continue;   // 已有更新的一版
                     WxSession s = new WxSession();
                     s.UserName = u;
                     s.Unread = (int)AsLong(v[2]);
@@ -829,6 +1150,9 @@ namespace LocalChat
                     s.LastMsgType = AsLong(v[14]);
                     s.LastSender = v[16] as string;
                     s.LastSenderName = v[17] as string;
+                    WxSession old;
+                    if (byName.TryGetValue(u, out old) &&
+                        old.LastTimestamp >= s.LastTimestamp) continue;
                     byName[u] = s;
                 }
             }
@@ -838,32 +1162,6 @@ namespace LocalChat
                 return b.LastTimestamp.CompareTo(a.LastTimestamp);
             });
             return list;
-        }
-
-        /// <summary>
-        /// The most recent cached version of a database that contains the table.
-        /// Caches hold several versions of the same file; the file change
-        /// counter tells us which one is current.
-        /// </summary>
-        public WxDb BestWithTable(string table)
-        {
-            List<WxDb> sorted = new List<WxDb>(Dbs);
-            sorted.Sort(delegate (WxDb a, WxDb b)
-            {
-                return b.ChangeCounter.CompareTo(a.ChangeCounter);
-            });
-            foreach (WxDb db in sorted)
-            {
-                try { if (db.HasTable(table)) return db; }
-                catch { }
-            }
-            return null;
-        }
-
-        private static bool HasTableSafe(WxDb db, string table)
-        {
-            try { return db.HasTable(table); }
-            catch { return false; }
         }
 
         /// <summary>Two page caches describe the same file if their schemas agree.</summary>
@@ -880,38 +1178,51 @@ namespace LocalChat
             int common = 0;
             foreach (string k in A) if (B.Contains(k)) common++;
             int small = Math.Min(A.Count, B.Count);
-            return common >= 3 && common * 2 >= small;
+            if (common >= 3 && common * 2 >= small) return true;
+            // 缓存里只有一两张表的修订版（sqlite_master 的叶子大多没被缓存）
+            // 靠"表名重合"是认不出来的，改看页数：同一个文件的各修订版页数
+            // 几乎相同，不同的库（message_0 1881 与 biz_message_0 3702）差很远。
+            if (common >= 1)
+            {
+                int d = Math.Abs(a.DbPages - b.DbPages);
+                if (a.DbPages > 0 && b.DbPages > 0 &&
+                    d <= Math.Max(4, a.DbPages / 100)) return true;
+            }
+            return false;
         }
 
         /// <summary>
-        /// Page pool for reading a table: the newest revision of every page we
-        /// hold, with gaps filled from older revisions of the same file.  Page
-        /// numbers are stable across revisions, so this maximises how much of
-        /// the b-tree is reachable while still preferring fresh data.
+        /// 一张表的所有页池。同一个文件在页缓存里通常有好几份（每个连接一份，
+        /// 快慢不一），只看其中一份会漏掉最新数据：实测 change counter 大的
+        /// 那一份反而是旧的（page 1 是连接自己缓存里的老副本），最新的消息
+        /// 只在另一份里。所以根页号取"能读到 sqlite_master 的那一版"，数据页
+        /// 则每一版都读一遍再合并 —— 页号在修订版之间是稳定的。
         /// </summary>
-        public WxDb PooledWithTable(string table)
+        public List<WxDb> PoolsWithTable(string table, out int root)
         {
+            root = 0;
             List<WxDb> sorted = new List<WxDb>(Dbs);
             sorted.Sort(delegate (WxDb a, WxDb b)
             {
                 return b.ChangeCounter.CompareTo(a.ChangeCounter);
             });
-            WxDb best = null;
-            foreach (WxDb db in sorted)
-                if (HasTableSafe(db, table)) { best = db; break; }
-            if (best == null) return null;
-            WxDb pool = new WxDb(Img);
-            pool.DbPages = best.DbPages;
-            pool.ChangeCounter = best.ChangeCounter;
-            pool.Label = best.Label;
+            WxDb schema = null;
             foreach (WxDb db in sorted)
             {
-                if (db != best && !SameFile(best, db)) continue;
-                foreach (KeyValuePair<int, int> kv in db.PageOff)
-                    if (!pool.PageOff.ContainsKey(kv.Key))
-                        pool.PageOff[kv.Key] = kv.Value;
+                Dictionary<string, int> t;
+                int r;
+                try { t = db.Tables(); }
+                catch { continue; }
+                if (!t.TryGetValue(table, out r) || r <= 0) continue;
+                schema = db;
+                root = r;
+                break;
             }
-            return pool;
+            List<WxDb> pools = new List<WxDb>();
+            if (schema == null) return pools;
+            foreach (WxDb db in sorted)
+                if (db == schema || SameFile(schema, db)) pools.Add(db);
+            return pools;
         }
 
         public static string Md5Hex(string s)
@@ -956,22 +1267,40 @@ namespace LocalChat
         /// <summary>Messages of one Msg_ table, newest first.</summary>
         public List<WxMessage> MessagesByTable(string table, out string note)
         {
-            List<WxMessage> outl = new List<WxMessage>();
+            int root;
+            List<WxDb> pools = PoolsWithTable(table, out root);
             note = "";
-            WxDb db = PooledWithTable(table);
-            if (db == null)
+            if (pools.Count == 0)
             {
                 note = "页缓存里没有这张表";
-                return outl;
+                return new List<WxMessage>();
             }
-            int root = db.Tables()[table];
-            foreach (SqlRow r in db.TableRows(root))
+            Dictionary<long, WxMessage> byId = new Dictionary<long, WxMessage>();
+            StringBuilder det = new StringBuilder();
+            foreach (WxDb db in pools)
             {
-                WxMessage m = ToMessage(table, r);
-                if (m != null) outl.Add(m);
+                foreach (SqlRow r in db.TableRows(root))
+                {
+                    WxMessage m = ToMessage(table, r);
+                    if (m == null) continue;
+                    WxMessage old;
+                    if (byId.TryGetValue(m.LocalId, out old) &&
+                        old.CreateTime >= m.CreateTime) continue;
+                    byId[m.LocalId] = m;
+                }
+                det.AppendFormat("{0}页/缺{1} ", db.PageOff.Count, db.MissingCount);
             }
-            note = string.Format("库 DbPages={0} change={1} 缺 {2} 页",
-                                 db.DbPages, db.ChangeCounter, db.MissingCount);
+            string freshNote;
+            foreach (WxMessage m in FreshTail(table, 0, out freshNote))
+            {
+                WxMessage old;
+                if (byId.TryGetValue(m.LocalId, out old) &&
+                    old.CreateTime >= m.CreateTime) continue;
+                byId[m.LocalId] = m;
+            }
+            List<WxMessage> outl = new List<WxMessage>(byId.Values);
+            note = string.Format("{0} 个页池（{1}）；{2}", pools.Count,
+                                 det.ToString().Trim(), freshNote);
             outl.Sort(delegate (WxMessage a, WxMessage b)
             {
                 return b.CreateTime.CompareTo(a.CreateTime);
@@ -980,47 +1309,182 @@ namespace LocalChat
         }
 
         /// <summary>
-        /// Newest rows of one Msg_ table, read from the right-most leaf only --
-        /// O(tree depth) instead of a full scan.  This is what polling uses.
+        /// 最新那些行 —— 从内存里散落的页映像里取。
+        ///
+        /// 页缓存那份往往停在几小时前（实测 TT 的会话停在 17:14、消息一行都
+        /// 读不出来，而界面上是 22:31）。新写入的页不在任何页缓存里，只以
+        /// 页映像的形式留在内存别处。这里：
+        ///   1. 用"孩子集合和缓存里的根页高度重合"认出根页的新副本；
+        ///   2. 新副本最右单元给出 (孩子页号, 该子树最大 rowid)；
+        ///   3. 再用最大/最小 rowid 去内存里认出对应的叶子页映像，读出行。
+        /// 认错的代价是读到别的对话的行，所以匹配条件是 rowid 范围必须接得上。
         /// </summary>
-        public List<WxMessage> TableTail(string table, int max, out string note)
+        public List<WxMessage> FreshTail(string table, int max, out string note)
         {
-            List<WxMessage> outl = new List<WxMessage>();
             note = "";
-            WxDb db = PooledWithTable(table);
-            if (db == null) { note = "不在页缓存里"; return outl; }
-            int root = db.Tables()[table];
-            foreach (SqlRow r in db.TailRows(root, max))
+            List<WxMessage> outl = new List<WxMessage>();
+            int root;
+            List<WxDb> pools = PoolsWithTable(table, out root);
+            if (pools.Count == 0) { note = "没有页池"; return outl; }
+            MemPageIndex ix = PageIndex;
+            if (ix == null || ix.Interiors.Count == 0) { note = "内存里没有可用页"; return outl; }
+
+            // 缓存里根页的孩子（用来认"同一页的新副本"）
+            HashSet<int> known = new HashSet<int>();
+            foreach (WxDb db in pools)
+                foreach (int c in db.ChildrenOf(root))
+                    if (c > 0 && c < 1000000) known.Add(c);
+            if (known.Count < 8) { note = "根页不在缓存里"; return outl; }
+
+            MemPageIndex.Interior best = null;
+            long bestKey = long.MinValue;
+            foreach (MemPageIndex.Interior it in ix.Interiors)
             {
-                WxMessage m = ToMessage(table, r);
-                if (m != null) outl.Add(m);
+                if (it.Children.Length < 8) continue;
+                int ov = 0;
+                for (int i = 0; i < it.Children.Length; i++)
+                    if (known.Contains(it.Children[i])) ov++;
+                if (ov < 8 || ov * 2 < known.Count) continue;
+                long last = it.Keys[it.Keys.Length - 1];
+                if (best == null || last > bestKey) { best = it; bestKey = last; }
             }
-            note = string.Format("DbPages={0} change={1} 缺 {2} 页",
-                                 db.DbPages, db.ChangeCounter, db.MissingCount);
+            if (best == null) { note = "没找到更新的根页"; return outl; }
+
+            Dictionary<long, int> keyPg = new Dictionary<long, int>();
+            for (int i = 0; i < best.Keys.Length; i++)
+                if (!keyPg.ContainsKey(best.Keys[i])) keyPg[best.Keys[i]] = best.Children[i];
+            long lastCellKey = best.Keys[best.Keys.Length - 1];
+
+            byte[] d = Img.Data;
+            Dictionary<long, WxMessage> byId = new Dictionary<long, WxMessage>();
+            int byPage = 0, byImage = 0;
+            bool rightRead = false;
+
+            // (a) 最稳的一条：新根页直接给了孩子页号，页号在页缓存里就直接读。
+            //     最右孩子（最右指针）没带 key，但它就在页号上摆着。
+            List<int> pgs = new List<int>();
+            if (best.Right > 0 && best.Right < 1000000) pgs.Add(best.Right);
+            for (int i = best.Children.Length - 1; i >= 0 && pgs.Count < 5; i--)
+                if (best.Children[i] > 0 && best.Children[i] < 1000000) pgs.Add(best.Children[i]);
+            foreach (int pg in pgs)
+            {
+                List<SqlRow> rows = null;
+                foreach (WxDb db in pools)
+                {
+                    if (!db.PageOff.ContainsKey(pg)) continue;
+                    rows = db.PageRows(pg);
+                    if (rows.Count == 0 && db.PageType(pg) == 5)
+                    {
+                        int[] lp = db.RightmostLeaf(pg);
+                        if (lp != null) rows = db.PageRows(lp[0]);
+                    }
+                    break;
+                }
+                if (rows == null || rows.Count == 0) continue;
+                if (pg == best.Right) rightRead = true;
+                byPage++;
+                AddRows(table, rows, byId);
+            }
+
+            // (b) 兜底：孩子页号不在页缓存里时，用 rowid 去内存页映像里认页。
+            //     两道锁：只认"最大的那个 key"，而且认到的页必须真的比页缓存里
+            //     的更新 —— 否则同一段小 rowid 会把别的对话的旧页认成自己的。
+            //     最右孩子只有在 (a) 拿不到时才敢按 rowid 猜，而且要挨着接上：
+            //     实测放宽到 200 就会把文件传输助手的页认成群聊的。
+            long knownMaxTime = 0;
+            foreach (WxDb db in pools)
+                foreach (SqlRow r in db.TailRows(root, 24))
+                    if (r.Values.Length == 17)
+                    {
+                        long t = AsLong(r.Values[5]);
+                        if (t > knownMaxTime) knownMaxTime = t;
+                    }
+            foreach (MemPageIndex.Leaf lf in ix.Leaves)
+            {
+                bool same = (lf.Max == lastCellKey);
+                bool next = !same && !rightRead && lf.Min > lastCellKey &&
+                            lf.Min - lastCellKey <= 20;
+                if (!same && !next) continue;
+                List<SqlRow> rows = pools[0].RowsAt(d, lf.Off, 0);
+                if (rows.Count == 0) continue;
+                long newest = 0;
+                foreach (SqlRow r in rows)
+                    if (r.Values.Length == 17)
+                    {
+                        long t = AsLong(r.Values[5]);
+                        if (t > newest) newest = t;
+                    }
+                if (newest <= knownMaxTime) continue;
+                byImage++;
+                AddRows(table, rows, byId);
+            }
+            outl.AddRange(byId.Values);
+            outl.Sort(delegate (WxMessage a, WxMessage b)
+            {
+                return a.CreateTime.CompareTo(b.CreateTime);
+            });
+            if (max > 0 && outl.Count > max) outl.RemoveRange(0, outl.Count - max);
+            note = string.Format("新根页 最大rowid={0}，按页号 {1} 页、按映像 {2} 页",
+                                 lastCellKey, byPage, byImage);
             return outl;
         }
 
-        /// <summary>
-        /// The message database that is most current: the one with the highest
-        /// file change counter that actually carries Msg_ tables.
-        /// </summary>
-        public WxDb MessageDb()
+        private static void AddRows(string table, List<SqlRow> rows,
+                                   Dictionary<long, WxMessage> byId)
         {
-            List<WxDb> sorted = new List<WxDb>(Dbs);
-            sorted.Sort(delegate (WxDb a, WxDb b)
+            foreach (SqlRow r in rows)
             {
-                return b.ChangeCounter.CompareTo(a.ChangeCounter);
-            });
-            foreach (WxDb db in sorted)
-            {
-                try
-                {
-                    foreach (string k in db.Tables().Keys)
-                        if (IsMsgTable(k)) return db;
-                }
-                catch { }
+                WxMessage m = ToMessage(table, r);
+                if (m == null) continue;
+                WxMessage old;
+                if (byId.TryGetValue(m.LocalId, out old) &&
+                    old.CreateTime >= m.CreateTime) continue;
+                byId[m.LocalId] = m;
             }
-            return null;
+        }
+
+        /// <summary>
+        /// Newest rows of one Msg_ table: 先按页缓存走最右叶子（O(树深)，
+        /// 这是轮询的主路径），再补上"只在内存页映像里"的那几页 —— 最新写入
+        /// 的那一页通常恰恰不在页缓存里。
+        /// </summary>
+        public List<WxMessage> TableTail(string table, int max, out string note)
+        {
+            int root;
+            List<WxDb> pools = PoolsWithTable(table, out root);
+            note = "";
+            if (pools.Count == 0) { note = "不在页缓存里"; return new List<WxMessage>(); }
+            Dictionary<long, WxMessage> byId = new Dictionary<long, WxMessage>();
+            foreach (WxDb db in pools)
+            {
+                // 池子里的最右叶子可能是旧的，所以一次多取几行，再按 local_id
+                // 合并、按时间挑新的。
+                foreach (SqlRow r in db.TailRows(root, Math.Max(max * 4, 24)))
+                {
+                    WxMessage m = ToMessage(table, r);
+                    if (m == null) continue;
+                    WxMessage old;
+                    if (byId.TryGetValue(m.LocalId, out old) &&
+                        old.CreateTime >= m.CreateTime) continue;
+                    byId[m.LocalId] = m;
+                }
+            }
+            string freshNote;
+            foreach (WxMessage m in FreshTail(table, 0, out freshNote))
+            {
+                WxMessage old;
+                if (byId.TryGetValue(m.LocalId, out old) &&
+                    old.CreateTime >= m.CreateTime) continue;
+                byId[m.LocalId] = m;
+            }
+            List<WxMessage> outl = new List<WxMessage>(byId.Values);
+            outl.Sort(delegate (WxMessage a, WxMessage b)
+            {
+                return a.CreateTime.CompareTo(b.CreateTime);
+            });
+            if (outl.Count > max) outl.RemoveRange(0, outl.Count - max);
+            note = string.Format("{0} 个页池；{1}", pools.Count, freshNote);
+            return outl;
         }
 
         /// <summary>"Msg_" + 32 位小写十六进制，且不是 _SENDERID 之类的索引表。</summary>
@@ -1036,16 +1500,23 @@ namespace LocalChat
             return true;
         }
 
-        /// <summary>所有会话消息表的名字。</summary>
+        /// <summary>
+        /// 所有会话消息表的名字：把每个页缓存里认得出的 Msg_ 表都并起来，
+        /// 不再只看"某一个最新的库" —— 消息库有两个（message_0.db 与
+        /// biz_message_0.db），而且每个库在缓存里还有好几个修订版。
+        /// </summary>
         public List<string> MessageTables()
         {
             List<string> names = new List<string>();
-            WxDb db = MessageDb();
-            if (db == null) return names;
-            Dictionary<string, int> t;
-            try { t = db.Tables(); }
-            catch { return names; }
-            foreach (string k in t.Keys) if (IsMsgTable(k)) names.Add(k);
+            HashSet<string> seen = new HashSet<string>();
+            foreach (WxDb db in Dbs)
+            {
+                Dictionary<string, int> t;
+                try { t = db.Tables(); }
+                catch { continue; }
+                foreach (string k in t.Keys)
+                    if (IsMsgTable(k) && seen.Add(k)) names.Add(k);
+            }
             names.Sort(StringComparer.Ordinal);
             return names;
         }
