@@ -235,17 +235,29 @@
 
   <div class="row" style="flex-wrap:wrap;gap:6px">
     <button class="act" id="btnListSessions">🔗 选择会话</button>
-    <select id="selSession" style="min-width:230px;max-width:100%;padding:5px 6px">
-      <option value="">（自动：任何有动静的会话都读）</option>
-    </select>
-    <button class="act" id="btnBind">绑定</button>
+    <span class="fine" id="bindNow" style="color:var(--dim)">未绑定（自动读任何有动静的对话）</span>
   </div>
+
+  <!-- 会话选择：弹出最近有动静的那几个对话，每条用"它的最新一条消息"当身份 -->
+  <div id="sessionPanel" hidden
+       style="margin:8px 0 0;border:1px solid var(--line);border-radius:10px;
+              background:var(--panel,#161a20);overflow:hidden">
+    <div class="row" style="align-items:center;gap:8px;padding:8px 10px;
+                             border-bottom:1px solid var(--line)">
+      <strong style="font-size:13px">最近有动静的对话</strong>
+      <span class="fine" id="sessionHint" style="color:var(--dim);flex:1"></span>
+      <button class="act ghost" id="btnRefreshSessions" style="padding:3px 9px">🔄 刷新</button>
+      <button class="act ghost" id="btnCloseSessions" style="padding:3px 9px">✕</button>
+    </div>
+    <div id="sessionList"></div>
+  </div>
+
   <p class="fine">
-    和某个人一直聊不通、或者想盯死一个对话时：点「选择会话」列出桥现在能读到的对话，
-    挑一个再点「绑定」。绑定后<strong>只读那一个对话</strong>。
-    <br><span style="color:var(--dim)">列表来自消息库里的 <code>Msg_&lt;md5&gt;</code> 表，
-    刻意不依赖 <code>session.db</code> —— 会话表实测只读得出一部分
-    （153 个里只有 53 个），那正是以前"朋友的对话识别不到"的原因。</span>
+    点「选择会话」弹出<strong>最近有动静的 3–5 个对话</strong>，每条拿它<strong>最新那条消息</strong>
+    当身份（时间 + 对方 + 消息内容）。选一条就绑定，之后只读它；点「🔄 刷新」重新识别一次最新的消息。
+    <br><span style="color:var(--dim)">识别走两条路：会话行给出"最新消息的 local_id"，
+    表名由对方 wxid 直接算出 <code>Msg_&lt;md5&gt;</code>；根页不在页缓存里时，
+    就按 local_id 去内存页映像里认那一页。识别不到正文的（公众号等）回落成会话摘要。</span>
   </p>
 
   <hr style="border:0;border-top:1px solid var(--line);margin:13px 0 11px">
@@ -744,10 +756,12 @@ var Bridge = (function(){
     return true;
   }
 
-  /** 绑定要读的会话。table 为空串 = 解绑，回到"任何有动静的都读"。 */
-  function bind(table){
+  /** 绑定要读的会话。table / who 都为空 = 解绑，回到"任何有动静的都读"。
+   *  给了 who（对方 wxid / 群号）就优先用它 —— 桥能算出表名，还能按会话行里
+   *  的 last_msg_locald_id 去内存页映像里认页。 */
+  function bind(table, who){
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify({ type:"bind", table: table || "" }));
+    ws.send(JSON.stringify({ type:"bind", table: table || "", session: who || "" }));
     return true;
   }
 
@@ -875,6 +889,9 @@ var pendingQueue = [];
 
 /* 拉取期间屏蔽剪贴板推送用的时间戳（毫秒）。0 = 不屏蔽。 */
 var pullingUntil = 0;
+
+/* 桥当前绑定的会话表名（"" = 自动）。用来在会话列表里标出正在读的那一个。 */
+var boundTable = "";
 
 /* 我有没有把公钥发出去过。
  * 用它把"点了密钥但还没等到对方"这件事说出来 —— 否则用户点完看药丸还是黄的，
@@ -1079,6 +1096,10 @@ Bridge.onState(function(kind, arg){
   else if (kind === "tables") { onTables(arg && arg.list ? arg.list : []); }
   else if (kind === "bound") {
     var bt = arg && arg.table ? arg.table : "";
+    boundTable = bt;
+    var tg = $("bindNow");
+    if (tg) tg.textContent = bt ? ("已绑定 " + (arg.who || bt)) : "未绑定（自动读任何有动静的对话）";
+    if (bt) { var sp = $("sessionPanel"); if (sp) sp.hidden = true; }
     addSys(bt ? "桥已绑定会话 " + bt + "（只读这一个）"
               : "桥已解绑，回到自动模式（任何有动静的会话都读）", "ok");
   }
@@ -1540,48 +1561,96 @@ function pullRecent(){
  * 刻意不依赖 session.db —— 会话表只缓存得到一部分，实测 153 个会话里
  * 只读得出 53 个，而"读不出来的那个对话"正是以前识别不到的那个。
  */
+/**
+ * 会话选择：弹出最近有动静的 3–5 个对话，每条拿"它最新那条消息"当身份。
+ *
+ * 列表由桥给：桥用会话行的 last_msg_locald_id + Msg_<md5(wxid)> 定位，
+ * 所以"页缓存里根页不在"的对话也能列出来；正文读不到时回落成会话摘要。
+ * 「🔄 刷新」就是再问一次 —— 每次都要桥重新抓一次内存快照并重新识别。
+ */
+function fmtWhen(t){
+  if (!t) return "--:--";
+  try {
+    var d = new Date(t * 1000);
+    var p = function(n){ return (n < 10 ? "0" : "") + n; };
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  } catch (e) { return "--:--"; }
+}
+
 function onTables(list){
-  var sel = $("selSession");
-  if (!sel) return;
-  var keep = sel.value;
-  sel.innerHTML = "";
-  var auto = document.createElement("option");
-  auto.value = "";
-  auto.textContent = "（自动：任何有动静的会话都读）";
-  sel.appendChild(auto);
-
-  for (var i = 0; i < list.length; i++) {
-    var it = list[i];
-    var o = document.createElement("option");
-    o.value = it.table;
-    var when = "";
-    try { when = new Date(it.time * 1000).toLocaleString(); } catch (e) {}
-    o.textContent = (it.preview || "（无文本）") + "  ·  " + when
-                  + "  ·  " + String(it.md5 || "").slice(0, 8);
-    sel.appendChild(o);
-  }
-  if (keep) sel.value = keep;
-
+  var box = $("sessionList");
+  if (!box) return;
+  box.innerHTML = "";
   if (!list.length) {
-    addSys("桥现在一个会话都读不到 —— 先在微信里打开那个对话（微信要把它的页读进缓存），再回来点一次", "bad");
-  } else {
-    addSys("桥现在能读到 " + list.length + " 个会话，挑一个再点「绑定」", "ok");
+    addSys("桥现在一个对话都识别不出来 —— 先在微信里打开那个对话（微信要把它的页读进缓存），再点一次「🔄 刷新」", "bad");
+    $("sessionHint").textContent = "0 个";
+    return;
   }
+
+  // 最上面一条恒为"解绑"：回到"任何有动静的都读"
+  var rows = [{ table:"", who:"（自动）", preview:"任何有动静的对话都读", time:0, how:"" }]
+             .concat(list);
+  for (var i = 0; i < rows.length; i++) {
+    (function(it){
+      var row = document.createElement("div");
+      row.className = "row";
+      row.style.cssText = "gap:9px;align-items:baseline;padding:7px 10px;cursor:pointer;"
+                        + "border-bottom:1px solid var(--line)";
+      row.onmouseenter = function(){ row.style.background = "rgba(255,255,255,.05)"; };
+      row.onmouseleave = function(){ row.style.background = ""; };
+
+      var when = document.createElement("span");
+      when.className = "fine";
+      when.style.cssText = "color:var(--dim);min-width:74px";
+      when.textContent = it.time ? fmtWhen(it.time) : "";
+
+      var body = document.createElement("span");
+      body.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+      var nm = document.createElement("strong");
+      nm.textContent = (it.who || it.md5 || "").slice(0, 26) + "　";
+      var pv = document.createElement("span");
+      pv.textContent = it.preview || "（无文本）";
+      body.appendChild(nm); body.appendChild(pv);
+
+      var tag = document.createElement("span");
+      tag.className = "fine";
+      tag.style.color = "var(--dim)";
+      tag.textContent = (it.table && it.table === boundTable) ? "✓ 正在读" : (it.how || "");
+
+      row.appendChild(when); row.appendChild(body); row.appendChild(tag);
+      row.title = "点击绑定：" + (it.who || it.table || "自动");
+      row.addEventListener("click", function(){
+        beacon("pick-session", "t=" + (it.table || "") + " s=" + (it.who || ""));
+        if (!Bridge.bind(it.table || "", it.who || "")) {
+          addSys("绑定请求没发出去", "bad"); return;
+        }
+      });
+      box.appendChild(row);
+    })(rows[i]);
+  }
+  $("sessionHint").textContent = list.length + " 个（最多 5 个）";
+  addSys("桥识别出 " + list.length + " 个最近有动静的对话，点一条即可绑定", "ok");
   beacon("tables-ok", "n=" + list.length);
 }
 
 $("btnListSessions").addEventListener("click", function(){
   beacon("list-sessions-click");
   if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
-  addSys("正在问桥要可读的会话列表（要抓一次内存快照，约 0.5 秒）…");
+  $("sessionPanel").hidden = false;
+  $("sessionHint").textContent = "正在识别…";
+  addSys("正在让桥重新识别最新的消息（要抓一次内存快照，约 0.5 秒）…");
   if (!Bridge.listSessions()) addSys("请求没发出去：WebSocket 没打开", "bad");
 });
 
-$("btnBind").addEventListener("click", function(){
-  var v = $("selSession").value;
-  beacon("bind-click", "t=" + v);
+$("btnRefreshSessions").addEventListener("click", function(){
+  beacon("refresh-sessions-click");
   if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
-  if (!Bridge.bind(v)) { addSys("绑定请求没发出去", "bad"); return; }
+  $("sessionHint").textContent = "正在重新识别…";
+  if (!Bridge.listSessions()) addSys("刷新请求没发出去", "bad");
+});
+
+$("btnCloseSessions").addEventListener("click", function(){
+  $("sessionPanel").hidden = true;
 });
 
 $("btnPull").addEventListener("click", pullRecent);

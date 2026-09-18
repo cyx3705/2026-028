@@ -502,6 +502,26 @@ internal static class WxReadMain
                 w.WriteLine("   共 {0} 张", found);
             }
 
+            // match -- 会话行算出来的表名对不对得上真实存在的 Msg_ 表
+            if (mode == "match")
+            {
+                HashSet<string> tabs = new HashSet<string>(snap.MessageTables());
+                List<WxSession> ss = snap.Sessions();
+                int hit = 0;
+                for (int i = 0; i < ss.Count; i++)
+                {
+                    WxSession s = ss[i];
+                    string t = "Msg_" + WxSnapshot.Md5Hex(s.UserName);
+                    bool ok = tabs.Contains(t);
+                    if (ok) hit++;
+                    w.WriteLine("{0} last={1} id={2,-6} {3} {4}", ok ? "对 " : "缺 ",
+                                Time(s.LastTimestamp), s.LastMsgLocalId, t.Substring(4, 8),
+                                s.UserName);
+                }
+                w.WriteLine("会话 {0} 个，表名对得上 {1} 个，消息表共 {2} 张",
+                            ss.Count, hit, tabs.Count);
+            }
+
             if (mode == "msgs" && args.Length > 1)
             {
                 string note;

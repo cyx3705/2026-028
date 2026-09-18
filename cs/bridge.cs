@@ -806,11 +806,16 @@ internal static class Bridge
     /// <summary>非文本消息给个占位，免得正文是空的让页面以为解析失败。</summary>
     private static string TypePlaceholder(long t)
     {
+        // 有些消息的 local_type 是合成的：高位放子类型、低 32 位才是基本类型。
+        // 实测 244813135921 = (57&lt;&lt;32)|49、21474836529 = (5&lt;&lt;32)|49，都是 49。
+        if (t > 10000) t = t & 0xFFFFFFFFL;
         if (t == 3) return "[图片]";
         if (t == 34) return "[语音]";
         if (t == 43) return "[视频]";
         if (t == 47) return "[表情]";
-        if (t == 49) return "[链接或文件]";
+        if (t == 48) return "[位置]";
+        if (t == 49) return "[链接或卡片]";
+        if (t == 50) return "[通话]";
         if (t == 10000) return "[系统消息]";
         return "[类型 " + t + "]";
     }
@@ -866,6 +871,20 @@ internal static class Bridge
             string tbl = tables[ti];
             string note;
             List<WxMessage> tail = snap.TableTail(tbl, 6, out note);
+            if (tail.Count == 0 && tables.Count == 1 && _sessionId.Length > 0)
+            {
+                // 根页不在页缓存里：拿会话行的 last_msg_locald_id 当锚点，去内存
+                // 页映像里认那一页，再顺着 rowid 往前接几页 —— 这条路不需要根页。
+                long anchor = 0;
+                foreach (WxSession s in snap.Sessions())
+                    if (s.UserName == _sessionId) { anchor = s.LastMsgLocalId; break; }
+                if (anchor > 0)
+                {
+                    string how2;
+                    tail = snap.LeafChain(tbl, anchor, 3, 1, out how2);
+                    note = how2;
+                }
+            }
             if (tail.Count == 0) continue;
             readable++;
             total += tail.Count;
@@ -944,13 +963,18 @@ internal static class Bridge
     }
 
     /// <summary>
-    /// 页缓存里现在读得到的会话消息表，按最新消息时间倒序，带一条预览。
-    /// 页面用它列出来让人挑一个绑定。
+    /// 会话选择列表：**以最新消息为准**，只列最近有动静的对话（3–5 个）。
     ///
-    /// 这条路刻意不依赖 session.db：会话表实测只能读到一部分
-    /// （153 个会话里只读得到 53 个），而消息库里每张 Msg_ 表只要最右叶子
-    /// 在缓存里就能读到 —— 所以"会话表里读不到"的对话照样能绑定。
+    /// 两条路并用，缺一不可：
+    ///   1. 会话行（SessionTable）给出每个会话的 last_msg_locald_id —— 表名
+    ///      可以由 username 直接算出来（Msg_ + md5(username)），所以会话行里
+    ///      有的对话都能列出来，不必先找到它的表根页。
+    ///   2. 消息表能走通就走表（最准）；走不通就按 last_msg_locald_id 去内存
+    ///      页映像里认那一页，把最新那条读出来；再不行才回落成会话摘要。
     /// </summary>
+    private const int SessionsMin = 3;
+    private const int SessionsMax = 5;
+
     private static string TablesJson()
     {
         try
@@ -958,31 +982,63 @@ internal static class Bridge
             EnsureWeChat();
             if (_wechatPid == 0) return "[]";
             WxSnapshot snap = WxSnapshot.CaptureAuto(_wechatPid);
-            List<string> names = snap.MessageTables();
             List<TableEntry> list = new List<TableEntry>();
-            for (int i = 0; i < names.Count; i++)
+            HashSet<string> seen = new HashSet<string>();
+            HashSet<string> noiseMd5 = new HashSet<string>();
+            List<WxSession> sessions = snap.Sessions();
+            foreach (WxSession s in sessions)
+                if (IsNoiseSession(s.UserName))
+                    noiseMd5.Add(WxSnapshot.Md5Hex(s.UserName));
+
+            foreach (WxSession s in sessions)
             {
+                // 公众号 / openim / brandsessionholder 这类"永远在动"的会话会把
+                // 最近 3–5 个名额全占了，选择列表里不列它们。
+                if (IsNoiseSession(s.UserName)) continue;
+                string tbl = "Msg_" + WxSnapshot.Md5Hex(s.UserName);
+                string how;
+                WxMessage m = snap.NewestFor(tbl, s.LastMsgLocalId, s.LastTimestamp, out how);
+                long tm = m != null ? m.CreateTime : s.LastTimestamp;
+                long ty = m != null ? m.LocalType : s.LastMsgType;
+                string prev = m != null ? m.Text : s.Summary;
+                if (string.IsNullOrEmpty(prev))
+                {
+                    // 最新那条是卡片/图片这类没正文的：拿它前面最近一条有正文的
+                    // 当提示。列表是给人认的，"最近在说什么"比"是什么类型"有用。
+                    string note2;
+                    List<WxMessage> t2 = snap.MessageTail(tbl, 8, out note2);
+                    for (int i = t2.Count - 1; i >= 0; i--)
+                        if (!string.IsNullOrEmpty(t2[i].Text)) { prev = t2[i].Text; break; }
+                }
+                if (string.IsNullOrEmpty(prev)) prev = TypePlaceholder(ty);
+                list.Add(Entry(tbl, s.UserName, tm, ty, prev, how));
+                seen.Add(tbl);
+            }
+
+            // 会话行里没有、但消息表读得出来的，也补上（比如刚建的会话）
+            foreach (string tbl in snap.MessageTables())
+            {
+                if (seen.Contains(tbl)) continue;
+                if (noiseMd5.Contains(tbl.Substring(4))) continue;
                 string note;
-                List<WxMessage> tail = snap.TableTail(names[i], 2, out note);
+                List<WxMessage> tail = snap.TableTail(tbl, 2, out note);
                 if (tail.Count == 0) continue;
                 WxMessage last = tail[tail.Count - 1];
                 string prev = last.Text;
                 if (string.IsNullOrEmpty(prev)) prev = TypePlaceholder(last.LocalType);
-                if (prev.Length > 60) prev = prev.Substring(0, 60);
-                TableEntry e = new TableEntry();
-                e.Time = last.CreateTime;
-                e.Json = "{\"table\":\"" + names[i] + "\",\"md5\":\""
-                       + names[i].Substring(4) + "\",\"time\":" + last.CreateTime
-                       + ",\"type\":" + last.LocalType
-                       + ",\"preview\":\"" + JsonEscape(prev) + "\"}";
-                list.Add(e);
+                list.Add(Entry(tbl, "", last.CreateTime, last.LocalType, prev, "表"));
+                seen.Add(tbl);
             }
+
             list.Sort(delegate(TableEntry a, TableEntry b)
             {
                 return b.Time.CompareTo(a.Time);
             });
+            if (list.Count > SessionsMax) list.RemoveRange(SessionsMax, list.Count - SessionsMax);
+
             List<string> js = new List<string>();
             for (int i = 0; i < list.Count; i++) js.Add(list[i].Json);
+            _lastListNote = list.Count + " 个（要 3–5 个）";
             return "[" + string.Join(",", js.ToArray()) + "]";
         }
         catch (Exception ex)
@@ -990,6 +1046,23 @@ internal static class Bridge
             Log("会话列表失败: " + ex.Message);
             return "[]";
         }
+    }
+
+    private static string _lastListNote = "";
+
+    private static TableEntry Entry(string table, string who, long time, long type,
+                                    string preview, string how)
+    {
+        if (preview != null && preview.Length > 60) preview = preview.Substring(0, 60);
+        TableEntry e = new TableEntry();
+        e.Time = time;
+        e.Json = "{\"table\":\"" + table + "\",\"md5\":\"" + table.Substring(4)
+               + "\",\"who\":\"" + JsonEscape(who == null ? "" : who)
+               + "\",\"time\":" + time + ",\"type\":" + type
+               + ",\"how\":\"" + JsonEscape(how == null ? "" : how)
+               + "\",\"preview\":\"" + JsonEscape(preview == null ? "" : preview)
+               + "\"}";
+        return e;
     }
 
     /// <summary>手动拉取：两种读取方式共用入口。</summary>
@@ -1741,6 +1814,9 @@ internal static class Bridge
                     if (msg.TryGetValue("table", out o) && o != null)
                         tbl = Convert.ToString(o).Trim();
                     if (tbl.Length > 0) sid = "";
+                    // 会话 id 比表名更好用：用它能算出表名，还能在"根页不在
+                    // 页缓存里"时按会话行的 last_msg_locald_id 去页映像里认页。
+                    if (sid.Length > 0) tbl = "";
                     _sessionId = sid;
                     _msgTable = tbl;
                     _msgWatermark.Clear();
@@ -1748,7 +1824,8 @@ internal static class Bridge
                         + " table=" + (tbl.Length == 0 ? "(无，自动)" : tbl));
                     WsSendText(client, "{\"type\":\"bound\",\"session\":\""
                                      + JsonEscape(sid) + "\",\"table\":\""
-                                     + JsonEscape(tbl) + "\"}");
+                                     + JsonEscape(tbl) + "\",\"who\":\""
+                                     + JsonEscape(sid) + "\"}");
                 }
                 else if (type == "tables")
                 {

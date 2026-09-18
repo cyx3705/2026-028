@@ -590,6 +590,7 @@ namespace LocalChat
         public long SortTimestamp;
         public int Unread;
         public long LastMsgType;
+        public long LastMsgLocalId;      // 最新那条消息在 Msg_ 表里的 local_id
         public string LastSender;
         public string LastSenderName;
         public string Summary;
@@ -1147,6 +1148,7 @@ namespace LocalChat
                     s.Summary = v[7] as string;
                     s.LastTimestamp = AsLong(v[10]);
                     s.SortTimestamp = AsLong(v[11]);
+                    s.LastMsgLocalId = AsLong(v[13]);
                     s.LastMsgType = AsLong(v[14]);
                     s.LastSender = v[16] as string;
                     s.LastSenderName = v[17] as string;
@@ -1441,6 +1443,134 @@ namespace LocalChat
                     old.CreateTime >= m.CreateTime) continue;
                 byId[m.LocalId] = m;
             }
+        }
+
+        /// <summary>
+        /// 某个会话"最新那条消息"，尽量不依赖会话表、也不依赖表根页在不在缓存里。
+        ///
+        /// 会话行自带 <c>last_msg_locald_id</c>：拿它去内存页映像里按 rowid 找页，
+        /// 页里的那一行就是最新消息 —— 根页不在缓存里时这条路依然通。找到页以后
+        /// 还能顺着 rowid 往上接（叶子页对 rowid 区间是严丝合缝铺满的），把之后
+        /// 新写入的几页也一起读出来。
+        /// </summary>
+        public WxMessage NewestFor(string table, long localId, long time, out string how)
+        {
+            how = "";
+            WxMessage byPage = null;
+            if (localId > 0) byPage = LeafImageRow(table, localId, time, out how);
+
+            string note;
+            List<WxMessage> tail = MessageTail(table, 24, out note);
+            WxMessage byTable = null;
+            if (tail.Count > 0) byTable = tail[tail.Count - 1];
+
+            if (byPage == null) { how = byTable != null ? "表" : "无"; return byTable; }
+            if (byTable == null) return byPage;
+            if (byTable.LocalId > byPage.LocalId) { how = "表"; return byTable; }
+            return byPage;
+        }
+
+        /// <summary>按 rowid 在内存页映像里认出那一行（锚点来自会话行）。</summary>
+        private WxMessage LeafImageRow(string table, long localId, long time, out string how)
+        {
+            how = "";
+            MemPageIndex ix = PageIndex;
+            if (ix == null) return null;
+            byte[] d = Img.Data;
+            WxDb any = Dbs.Count > 0 ? Dbs[0] : null;
+            if (any == null) return null;
+            foreach (MemPageIndex.Leaf lf in ix.Leaves)
+            {
+                if (localId < lf.Min || localId > lf.Max) continue;
+                foreach (SqlRow r in any.RowsAt(d, lf.Off, 0))
+                {
+                    if (r.RowId != localId) continue;
+                    WxMessage m = ToMessage(table, r);
+                    if (m == null) continue;
+                    // 只认时间也对得上的那一行：光是 rowid 落在区间里不够 ——
+                    // 小 rowid 段（几十到几百）在很多表里都有，放宽就会把文件
+                    // 传输助手的消息认成另一个人的最新消息。
+                    if (time != 0 && m.CreateTime != time) continue;
+                    how = "页映像";
+                    return m;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 从 rowid 锚点那一页开始，顺着 rowid 区间往前走（捡新消息）/往回走
+        /// （补上下文）。叶子页把 rowid 区间铺满且不重叠，所以"下一页 = 最小
+        /// rowid 正好接上一页最大 rowid"能一路串下去。按内容接不上就停。
+        /// </summary>
+        public List<WxMessage> LeafChain(string table, long anchor, int forward, int back,
+                                        out string how)
+        {
+            how = "";
+            List<WxMessage> outl = new List<WxMessage>();
+            MemPageIndex ix = PageIndex;
+            if (ix == null || anchor <= 0 || Dbs.Count == 0)
+            {
+                how = "没有可用的内存页";
+                return outl;
+            }
+            byte[] d = Img.Data;
+            WxDb any = Dbs[0];
+
+            MemPageIndex.Leaf seed = null;
+            foreach (MemPageIndex.Leaf lf in ix.Leaves)
+            {
+                if (anchor < lf.Min || anchor > lf.Max) continue;
+                bool exact = false;
+                foreach (SqlRow r in any.RowsAt(d, lf.Off, 0))
+                    if (r.RowId == anchor && ToMessage(table, r) != null) exact = true;
+                if (exact) { seed = lf; break; }
+                if (seed == null) seed = lf;
+            }
+            if (seed == null) { how = "锚点那一页不在内存里"; return outl; }
+
+            Dictionary<long, WxMessage> byId = new Dictionary<long, WxMessage>();
+            Dictionary<long, MemPageIndex.Leaf> byMin = new Dictionary<long, MemPageIndex.Leaf>();
+            Dictionary<long, MemPageIndex.Leaf> byMax = new Dictionary<long, MemPageIndex.Leaf>();
+            foreach (MemPageIndex.Leaf lf in ix.Leaves)
+            {
+                if (!byMin.ContainsKey(lf.Min)) byMin[lf.Min] = lf;
+                if (!byMax.ContainsKey(lf.Max)) byMax[lf.Max] = lf;
+            }
+            int pages = 0;
+            MemPageIndex.Leaf cur = seed;
+            for (int step = 0; step <= forward && cur != null; step++)
+            {
+                AddRows(table, any.RowsAt(d, cur.Off, 0), byId);
+                pages++;
+                MemPageIndex.Leaf next;
+                if (!byMin.TryGetValue(cur.Max + 1, out next)) break;
+                cur = next;
+            }
+            cur = byMax.ContainsKey(seed.Min - 1) ? byMax[seed.Min - 1] : null;
+            for (int step = 0; step < back && cur != null; step++)
+            {
+                AddRows(table, any.RowsAt(d, cur.Off, 0), byId);
+                pages++;
+                cur = byMax.ContainsKey(cur.Min - 1) ? byMax[cur.Min - 1] : null;
+            }
+            outl.AddRange(byId.Values);
+            outl.Sort(delegate (WxMessage a, WxMessage b)
+            {
+                return a.CreateTime.CompareTo(b.CreateTime);
+            });
+            how = string.Format("页映像链 {0} 页", pages);
+            return outl;
+        }
+
+        /// <summary>消息表的最新几行：能走表就走表，走不通就走内存页映像。</summary>
+        public List<WxMessage> MessageTail(string table, int max, out string note)
+        {
+            int root;
+            List<WxDb> pools = PoolsWithTable(table, out root);
+            if (pools.Count > 0) return TableTail(table, max, out note);
+            note = "根页不在页缓存里";
+            return new List<WxMessage>();
         }
 
         /// <summary>
