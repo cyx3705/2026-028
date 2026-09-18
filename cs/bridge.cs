@@ -484,8 +484,11 @@ internal static class Bridge
     }
 
     // 拖选几何（见 PullMessages 里 2026-09-18 的修正说明）
-    private const int PullXOuter = 30;   // 起点：距右边缘，落在头像右缘
-    private const int PullXInner = 70;   // 终点：距右边缘，落在气泡右缘
+    private const int PullXOuter = 30;      // 起点：距右边缘，落在头像右缘
+    private const int PullXInner = 70;      // 终点：距右边缘，落在气泡右缘
+    private const int PullHeight = 300;     // 从最下面往上拉多高（越小越不打扰）
+    private const int PullBottomInset = 110;// 距下边缘：输入框正上方
+    private const int PullTopMargin = 120;  // 离顶至少留这么多 —— 碰到顶微信会把列表翻上去
 
     /// <summary>
     /// 拉取当前对话里可见消息的纯文本（拿不到返回 null）。
@@ -528,26 +531,34 @@ internal static class Bridge
         if (!WeChatIsForeground()) { Log("拉取失败: 前台校验未通过，已中止"); return null; }
         if (!WeChatLooksLoggedIn(_wechatHwnd)) { Log("拉取失败: 微信看起来停在登录界面，已中止"); return null; }
 
-        RECT wr;
-        GetWindowRect(_wechatHwnd, out wr);
-
-        int xOuter = wr.Right - PullXOuter;
-        int xInner = wr.Right - PullXInner;
-        int yTop = wr.Top + 70;      // 距上边缘：刚好跳过会话标题栏，够到最上面一条
-        int bot = 110;               // 距下边缘：跳过输入框
-
-        // 输入框高度随草稿行数变化，所以底部内缩要能兜底：
-        // 万一拖进了输入框（把草稿选中了），结果里不会有"年月日"那行，
-        // 那就加大内缩再试一次。
+        // 从**最下面**往上拉一小段，绝不碰到顶部。
+        //
+        // 踩过：原来是从上边缘 +70 一直拉到下边缘 -170，也就是顶着标题栏拖。
+        // 那样微信会**自动把会话列表往上翻**，翻到很久以前 —— 于是每次拉到的
+        // 都是不同的一屏（实测同一套代码一会儿 866 字符一会儿 1320 字符），
+        // 而且把用户正在看的对话位置也带跑了。
+        //
+        // 现在只拉底部 PullHeight 这么高，并且离顶至少 PullTopMargin。
+        // 实测（探针 probe.exe bot，连拉两次不重置，看第一条是不是同一个）：
+        //     高度 300 -> 4 条，两次第一条完全一样（没翻）
+        //     高度 420 -> 6 条，两次一样
+        //     高度 560 -> 7 条，两次一样
+        // 取最小的 300：反正页面只处理最近 5 条，信息越少越不容易出事。
         string pulled = null;
-        int[] botTries = { bot, bot + 130, bot + 280 };
+        RECT wr;
+        int[] botTries = { PullBottomInset, PullBottomInset + 130, PullBottomInset + 280 };
         foreach (int bt in botTries)
         {
             EnsureWeChat();
             if (_wechatHwnd == IntPtr.Zero) break;
             GetWindowRect(_wechatHwnd, out wr);
-            int yBot = wr.Bottom - bt;
-            if (yBot <= yTop + 40) continue;      // 消息区太矮，别拖了
+
+            int yBot = wr.Bottom - bt;                  // 最下面：输入框正上方
+            int yTop = yBot - PullHeight;               // 只往上拉这么一点
+            int floor = wr.Top + PullTopMargin;         // 绝不到顶
+            if (yTop < floor) yTop = floor;
+
+            if (yBot <= yTop + 40) continue;            // 消息区太矮，别拖了
             pulled = DragAndCopy(wr.Right - PullXOuter, yBot, wr.Right - PullXInner, yTop);
             if (LooksLikeDump(pulled)) break;
         }

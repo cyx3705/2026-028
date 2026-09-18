@@ -170,9 +170,25 @@ Pinavia
 ```
 x 外 = 右边缘 - 30      起点，落在头像右缘
 x 内 = 右边缘 - 70      终点，落在气泡右缘
-yTop = 上边缘 + 70      跳过会话标题栏（再往下就会漏掉最上面那条）
-yBot = 下边缘 - 110     跳过输入框
+yBot = 下边缘 - 110     起点：输入框正上方，就是"最下面"
+yTop = yBot - 300       终点：只往上拉 300px（并且离顶至少 120px）
 ```
+
+### 不能拉到顶：会把会话列表翻上去
+
+早先是 `yTop = 上边缘 + 70`，等于顶着标题栏往上拖。**微信会因此自动把列表往上翻**，
+翻到很久以前 —— 于是每次拉到的都是不同的一屏（同一套代码实测一会儿 866 字符一会儿
+1320 字符），而且把用户正在看的对话位置也带跑了。
+
+改成贴着底部往上拉一段就稳了。实测（连拉两次不重置，看第一条是不是同一个）：
+
+| 高度 | 条数 | 两次第一条 |
+| --- | --- | --- |
+| 300 | 4 | ✅ 完全一样 |
+| 420 | 6 | ✅ 完全一样 |
+| 560 | 7 | ✅ 完全一样 |
+
+取最小的 **300**：页面只处理最近 5 条，信息越少越不容易出事，也越不打扰。
 
 窗口**移动**不受影响：每次重新 `GetWindowRect`，`SetCursorPos` 用的是绝对屏幕坐标
 （实测在 `(-2471, 292)` 这种负坐标的第二显示器上照常工作）。
@@ -237,6 +253,26 @@ yBot = 下边缘 - 110     跳过输入框
 手动拉取时页面用 `pullingUntil` 挡得住，但**自动拉取不是页面发起的**，页面不知道，
 于是同一条消息会被处理两遍（`clipboard` + `pulled`）。所以 `_suppressClipboardUntil` 这道闸
 必须在桥这边，覆盖整个"拖选 + Ctrl+C + 还原剪贴板"的过程。
+
+### 为什么"不抢鼠标"做不到（四条路都试过）
+
+拖选必须动真实鼠标：`SendInput` 是按屏幕坐标打真实硬件输入的，系统光标一定会跟过去。
+（现在拖完会把光标放回原处，所以只是闪一下。）为了彻底不碰光标，试了四条路，全部失败：
+
+| 方法 | 结果 |
+| --- | --- |
+| `PostMessage` / `SendMessage` 发 `WM_LBUTTONDOWN/MOUSEMOVE/UP` | 微信完全不理。Post 和 Send **都是 STALE**（剪贴板序号没变），和 Qt 官方论坛/StackOverflow 记录的一致：Qt 窗口不响应合成的鼠标消息 |
+| 旧版 `InjectTouchInput`（Windows 自带触摸注入） | `InitializeTouchInjection()` **免管理员就成功**，但 `InjectTouchInput()` **永远 `err=87 ERROR_INVALID_PARAMETER`**。8 种参数组合、3 种 feedback 模式、以及**手写清零缓冲按显式偏移填字段**（排除结构体/padding 疑问）全部一样 → 是 API 层拒绝，不是数据问题 |
+| 合成**笔**设备 `CreateSyntheticPointerDevice(PT_PEN)` + `InjectSyntheticPointerInput` | 设备建得出来（`err=0`），帧全部被接受，**系统光标真的一动不动**（实测 `cursorMoved=False`）—— 但微信不产生任何选择（STALE）。悬停优先、`FIRSTBUTTON` 都试了 |
+| 合成**触摸**设备 `CreateSyntheticPointerDevice(PT_TOUCH)` | 帧被接受，微信同样不理；而且它**还会把光标带跑**（`cursorMoved=True`），连"不碰光标"这个好处都没有 |
+
+`CreateSyntheticPointerDevice(PT_MOUSE)` 直接 `err=87`，鼠标类型的合成指针根本不给建。
+
+**结论**：微信 4.x 那个自绘窗口（`MMUIRenderSubWindowHW`）只认真实硬件鼠标。
+要真的不动光标，只能上内核级虚拟 HID（[vmulti](https://github.com/djpnewton/vmulti) /
+[vmulti-mice](https://github.com/Kolyn090/vmulti-mice)）—— 那要编译 2010 年的 WDK 驱动、
+自签名、测试模式、装驱动、重启，而且 vmulti-mice 自己的 TODO 里 **Dragging 明确没实现**。
+为了拖选去装个未签名内核驱动不划算，所以维持"真实鼠标 + 结束后还原光标"。
 
 ### 拉取逼出来的两个窗口状态 bug
 
