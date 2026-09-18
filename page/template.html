@@ -218,6 +218,16 @@
     公钥以 <code>E2E1-K.…</code> 开头，会作为一条普通微信消息发出去 —— 别人看起来就是一串乱码。
   </p>
 
+  <div class="row">
+    <button class="act" id="btnPull">📥 拉取最近消息（自动）</button>
+  </div>
+  <p class="fine">
+    桥会自动切到微信 → 在消息区拖选可见消息 → <code>Ctrl+C</code> 复制回来。
+    <strong>中文原样显示，密文自动解密</strong>，取最近 5 条。
+    <br><span style="color:var(--dim)">代价：这一下会切走焦点并占用剪贴板。
+    只拉当前对话里<strong>看得见</strong>的消息。</span>
+  </p>
+
   <hr style="border:0;border-top:1px solid var(--line);margin:13px 0 11px">
 
   <h3>📥 手动收下</h3>
@@ -665,6 +675,8 @@ var Bridge = (function(){
       else if (m.type === "hello") { if (onState) onState("connected", m.backend); }
       else if (m.type === "sent") { if (onState) onState("sent", m); }
       else if (m.type === "status") { if (onState) onState("wechat", m.wechat); }
+      else if (m.type === "pulling") { if (onState) onState("pulling"); }
+      else if (m.type === "pulled") { if (onState) onState("pulled", m); }
     };
     ws.onerror = function(){ /* onclose 会紧跟着触发，统一在那里处理 */ };
     ws.onclose = function(){
@@ -680,9 +692,22 @@ var Bridge = (function(){
     return true;
   }
 
+  /**
+   * 让桥去微信里拉一次消息。
+   *
+   * 走 WS 而不是 fetch：file:// 页面用 fetch 打本地端口有 CORS 和
+   * 本地网络访问（LNA）的风险，而 WS 从 file:// 连回环地址早就验证可用。
+   */
+  function pull(){
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type:"pull" }));
+    return true;
+  }
+
   return {
     connect: connect,
     send: send,
+    pull: pull,
     isConnected: function(){ return connected; },
     onText: function(f){ onText = f; },
     onState: function(f){ onState = f; }
@@ -797,6 +822,9 @@ function refreshPills(){
  * 却不知道是哪一条失败。用队列而不是单个变量 —— 测试模式下一次操作
  * 会发两条（出站密文 + 对方的回复密文），单个变量会被覆盖导致张冠李戴。 */
 var pendingQueue = [];
+
+/* 拉取期间屏蔽剪贴板推送用的时间戳（毫秒）。0 = 不屏蔽。 */
+var pullingUntil = 0;
 
 /* 我有没有把公钥发出去过。
  * 用它把"点了密钥但还没等到对方"这件事说出来 —— 否则用户点完看药丸还是黄的，
@@ -969,7 +997,10 @@ function handleOne(text, source){
   }
 
   if (Crypto.myPubRaw() && text.length > 0 && text.length < 400) {
-    addBubble(text, "in", source === "clipboard" ? "剪贴板（未加密）" : "对方（未加密）");
+    var who = source === "clipboard" ? "剪贴板（未加密）"
+            : source === "wechat-pull" ? "微信（未加密）"
+            : "对方（未加密）";
+    addBubble(text, "in", who);
   }
 }
 
@@ -992,9 +1023,19 @@ Bridge.onState(function(kind, arg){
     if (arg === "not-found") addSys("桥找不到微信窗口，请先把微信主窗口打开", "bad");
     else if (arg === "not-logged-in") addSys("微信停在登录界面，请先登录并打开一个对话", "bad");
   }
+  else if (kind === "pulling") { setStatus("正在从微信拉取…", "wait"); }
+  else if (kind === "pulled") { onPulled(arg); }
 });
 
-Bridge.onText(function(text){ handleIncoming(text, "clipboard"); });
+Bridge.onText(function(text){
+  // 拉取期间屏蔽剪贴板推送：那次 Ctrl+C 是我们自己按的，
+  // 内容已经在 pulled 回复里处理过了，不屏蔽就会每条显示两遍。
+  if (pullingUntil && Date.now() < pullingUntil) {
+    beacon("clipboard-suppressed", "len=" + (text ? text.length : 0));
+    return;
+  }
+  handleIncoming(text, "clipboard");
+});
 
 /* =====================================================================
  * 测试模式：假装第二端
@@ -1296,6 +1337,79 @@ $("pasteIn").addEventListener("keydown", function(e){
   // 框里要能换行，所以用 Ctrl+Enter 提交而不是 Enter
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); recvManualFromBox(); }
 });
+
+/* =====================================================================
+ * 自动拉取：让桥去微信里把可见消息读回来
+ *
+ * 这是唯一走得通的自动读取路径。微信的消息区是一整块自绘画布，
+ * UIA 完全读不到（连开了无障碍桥也只有 1 个元素），键盘也没有"全选消息"。
+ * 但用鼠标在消息区拖一下会形成一次文字选择，Ctrl+C 之后微信就把
+ * 选中的消息以纯文本放进剪贴板：
+ *
+ *     Pinavia
+ *     2026年09月18日 17:17
+ *     E2E1-K.BDSEQpqu…
+ *
+ * 每条之间用空行分隔。下面负责把它拆成一条条正文。
+ * ===================================================================== */
+
+function parseWeChatDump(text){
+  var out = [];
+  var blocks = String(text).split(/\r?\n[ \t]*\r?\n/);
+
+  for (var i = 0; i < blocks.length; i++) {
+    var lines = blocks[i].split(/\r?\n/);
+    while (lines.length && !lines[0].trim()) lines.shift();
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    if (!lines.length) continue;
+
+    // 找到"年月日"那一行，它后面才是正文，前面是发送者
+    var at = -1;
+    for (var j = 0; j < lines.length; j++) {
+      if (/\d{4}年\d{1,2}月\d{1,2}日/.test(lines[j])) { at = j; break; }
+    }
+    var body = (at >= 0 ? lines.slice(at + 1) : lines).join("\n").trim();
+    if (body) out.push(body);
+  }
+  return out;
+}
+
+function onPulled(m){
+  setStatus("桥已连接", "on");
+  // 拉取用的那一下 Ctrl+C 会被剪贴板监听线程也捕获到，
+  // 于是页面会同时收到"pulled 回复"和"clipboard 推送"两份 ——
+  // 不过滤的话每条消息都会显示两遍。监听是 400ms 轮询，所以留 2.5 秒窗口。
+  pullingUntil = Date.now() + 2500;
+  if (!m.ok) {
+    addSys("拉取失败：桥说微信里没读到内容（消息区是空的？还是拖的位置不对）", "bad");
+    beacon("pull-empty");
+    return;
+  }
+  var msgs = parseWeChatDump(m.text);
+  if (!msgs.length) {
+    addSys("拉回来 " + m.len + " 字符，但一条消息都解析不出来", "bad");
+    beacon("pull-parse-fail", "len=" + m.len);
+    return;
+  }
+  var take = msgs.slice(-5);      // 只处理最近 5 条
+  addSys("🧲 从微信拉回 " + msgs.length + " 条（" + m.len + " 字符），取最近 "
+         + take.length + " 条处理", "ok");
+  for (var i = 0; i < take.length; i++) handleIncoming(take[i], "wechat-pull");
+  beacon("pull-ok", "n=" + msgs.length);
+}
+
+function pullRecent(){
+  beacon("pull-click");
+  if (!Bridge.isConnected()) { addSys("拉取失败：桥没连上", "bad"); return; }
+  pullingUntil = Date.now() + 20000;      // 从发出到拿到结果，这段时间内屏蔽推送
+  addSys("正在让桥去微信里拉取（会切到微信、在消息区拖一下再复制）…");
+  if (!Bridge.pull()) {
+    pullingUntil = 0;
+    addSys("拉取失败：WebSocket 没打开", "bad");
+  }
+}
+
+$("btnPull").addEventListener("click", pullRecent);
 
 $("btnCopyKey").addEventListener("click", function(){
   copyText(Crypto.myKeyEnvelope());

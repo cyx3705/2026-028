@@ -123,6 +123,8 @@ eval(m[1] + `
   Crypto: Crypto,
   handleIncoming: handleIncoming,
   recvManual: recvManual,
+  parseWeChatDump: parseWeChatDump,
+  onPulled: onPulled,
   refreshPills: refreshPills,
   PREFIX_KEY: PREFIX_KEY,
   PREFIX_MSG: PREFIX_MSG,
@@ -332,6 +334,60 @@ const settle = () => new Promise(r => setTimeout(r, 60));
   P.recvManual("随便一句\n又一句", "多行");
   await settle();
   check(logHas("从整块剪贴板里解析出"), "整块多行：纯中文多行也逐条显示");
+
+  // ---------- 解析微信导出的消息文本 ----------
+  // 格式来自实测：拖选消息后 Ctrl+C，微信放进剪贴板的就是这样
+  const dump = [
+    "Pinavia",
+    "2026年09月18日 17:05",
+    "E2E1-K.BDSEQpquWuhD",
+    "",
+    "Pinavia",
+    "2026年09月18日 17:06",
+    "【测试】桥自检",
+    "",
+    "Pinavia",
+    "2026年09月18日 17:18",
+    "123123",
+  ].join("\n");
+
+  const parsed = P.parseWeChatDump(dump);
+  check(parsed.length === 3, "解析微信导出：拆出 3 条", JSON.stringify(parsed));
+  check(parsed[0] === "E2E1-K.BDSEQpquWuhD",
+        "解析微信导出：第 1 条正文正确（剥掉发送者和时间）", parsed[0]);
+  check(parsed[2] === "123123", "解析微信导出：第 3 条正文正确", parsed[2]);
+
+  const p2 = P.parseWeChatDump("某人\n2026年09月18日 10:00\n第一行\n第二行");
+  check(p2.length === 1 && p2[0] === "第一行\n第二行",
+        "解析微信导出：多行正文留在同一条里（不被拆散）", JSON.stringify(p2));
+
+  const p3 = P.parseWeChatDump("就一句话");
+  check(p3.length === 1 && p3[0] === "就一句话",
+        "解析微信导出：没有时间戳也能兜住", JSON.stringify(p3));
+
+  // ---------- 拉取结果的处理（走 onPulled，跟桥回了 pulled 一样）----------
+  P.Crypto.clearPeer();
+  P.refreshPills();
+
+  const kp9 = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const raw9 = new Uint8Array(await crypto.subtle.exportKey("raw", kp9.publicKey));
+  const dumpForPull = [
+    "Pinavia", "2026年09月18日 17:00", "一条中文消息",
+    "", "Pinavia", "2026年09月18日 17:01", P.PREFIX_KEY + P.b64uEncode(raw9),
+  ].join("\n");
+
+  const n0 = $(("log")).children.length;
+  P.onPulled({ ok: true, len: dumpForPull.length, text: dumpForPull });
+  await settle();
+  check($(("log")).children.length > n0, "拉取结果：产生了气泡");
+  check(pillKey().textContent === "密钥 已就绪",
+        "拉取结果：里面的公钥被摘出来并生效", pillKey().textContent);
+  check(logHas("从微信拉回"), "拉取结果：日志报告拉回几条",
+        JSON.stringify(logLines().slice(-3)));
+
+  P.onPulled({ ok: false });
+  check(logHas("拉取失败"), "拉取结果：ok=false 时有明确提示");
 
   console.log("");
   console.log("通过 " + pass + " / " + (pass + fail));

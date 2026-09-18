@@ -43,7 +43,9 @@ internal static class Bridge
     private const int CfUnicodeText = 13;
     private const uint GmemMoveable = 0x0042;
     private const int SwRestore = 9;
+    private const int SwShow = 5;
     private const ushort VkControl = 0x11, VkV = 0x56, VkReturn = 0x0D;
+    private const ushort VkC = 0x43, VkEscape = 0x1B;
     private const uint KeyeventfKeyup = 0x0002;
 
     private static readonly object ClientsLock = new object();
@@ -101,8 +103,12 @@ internal static class Bridge
 
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] private static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
+    private const uint MeLeftdown = 0x0002, MeLeftup = 0x0004;
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
@@ -207,11 +213,43 @@ internal static class Bridge
     // WeChat window
     // ------------------------------------------------------------------
 
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+
+    // 慢路径扫描用的状态（EnumWindows 的回调没法带闭包，只能放静态字段）
+    private static uint _scanPid;
+    private static IntPtr _scanBest;
+    private static long _scanBestArea;
+    private static bool _scanLoggedInOnly;
+
+    private static bool ScanWindow(IntPtr h, IntPtr l)
+    {
+        uint pid;
+        GetWindowThreadProcessId(h, out pid);
+        if (pid != _scanPid) return true;
+
+        if (ClassOf(h).IndexOf("Qt", StringComparison.Ordinal) < 0) return true;
+
+        RECT r;
+        if (!GetWindowRect(h, out r)) return true;
+        int w = r.Right - r.Left, hh = r.Bottom - r.Top;
+        long area = (long)w * hh;
+
+        bool ok = WeChatLooksLoggedIn(h);
+        Log("  候选窗口 hwnd=" + h.ToInt64() + " 尺寸=" + w + "x" + hh
+            + " 已登录=" + (ok ? "是" : "否"));
+
+        if (_scanLoggedInOnly && !ok) return true;
+        if (area > _scanBestArea) { _scanBestArea = area; _scanBest = h; }
+        return true;
+    }
+
     private static void FindWeChat()
     {
         Process[] procs = Process.GetProcessesByName("Weixin");
         if (procs.Length == 0) procs = Process.GetProcessesByName("WeChat");
 
+        // 快路径：窗口正常可见时 MainWindowHandle 就是它
         foreach (Process p in procs)
         {
             IntPtr h = p.MainWindowHandle;
@@ -219,12 +257,48 @@ internal static class Bridge
             {
                 _wechatHwnd = h;
                 _wechatPid = p.Id;
-                StringBuilder sb = new StringBuilder(256);
-                GetClassName(h, sb, 256);
-                Log("found WeChat: pid=" + p.Id + " class=" + sb.ToString());
+                Log("found WeChat: pid=" + p.Id + " class=" + ClassOf(h));
                 return;
             }
         }
+
+        // 慢路径：窗口被收进托盘时 MainWindowHandle 会是 0，
+        // 快路径整个失效（真踩过：这样会导致"找不到微信"，发送和拉取全废）。
+        // 枚举这些进程的所有顶层窗口，挑面积最大的那个 Qt 窗口 ——
+        // 主窗口很大，那些消息辅助窗口都是 0 尺寸。
+        foreach (Process p in procs)
+        {
+            // 先只挑"看起来已登录"的窗口（尺寸够大 + 可缩放边框）。
+            // 微信还有别的 Qt 顶层窗口（实测有个 1920x1026 的辅助窗口），
+            // 光按面积挑会挑错，于是被判成"停在登录界面"。
+            _scanPid = (uint)p.Id;
+            _scanBest = IntPtr.Zero;
+            _scanBestArea = 0;
+            _scanLoggedInOnly = true;
+            EnumWindows(ScanWindow, IntPtr.Zero);
+
+            if (_scanBest == IntPtr.Zero)
+            {
+                // 都不过关就退回"面积最大"，至少别找不到窗口
+                Log("  没有看起来已登录的 Qt 窗口，退回按面积挑");
+                _scanBestArea = 0;
+                _scanLoggedInOnly = false;
+                EnumWindows(ScanWindow, IntPtr.Zero);
+            }
+
+            if (_scanBest != IntPtr.Zero)
+            {
+                _wechatHwnd = _scanBest;
+                _wechatPid = p.Id;
+                RECT r;
+                GetWindowRect(_scanBest, out r);
+                Log("found WeChat（窗口被隐藏，走慢路径）: pid=" + p.Id
+                    + " class=" + ClassOf(_scanBest)
+                    + " 尺寸=" + (r.Right - r.Left) + "x" + (r.Bottom - r.Top));
+                return;
+            }
+        }
+
         _wechatHwnd = IntPtr.Zero;
         _wechatPid = 0;
     }
@@ -330,6 +404,11 @@ internal static class Bridge
 
         if (IsIconic(_wechatHwnd)) ShowWindow(_wechatHwnd, SwRestore);
 
+        // 还要处理"被收进托盘隐藏"这种情况 —— 那时 IsIconic 是 false，
+        // 光靠上面那句救不回来。真踩过：窗口句柄还在但 vis=False，
+        // 于是切前台失败，发送和拉取全部失效。
+        if (!IsWindowVisible(_wechatHwnd)) ShowWindow(_wechatHwnd, SwShow);
+
         // SetForegroundWindow is unreliable from a background process; the
         // AttachThreadInput dance is the standard workaround.
         uint dummy;
@@ -366,6 +445,117 @@ internal static class Bridge
         seq[0].U.ki.time = 0;
         seq[0].U.ki.dwExtraInfo = IntPtr.Zero;
         SendInput(1, seq, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    /// <summary>
+    /// 拉取当前对话里可见消息的纯文本（拿不到返回 null）。
+    ///
+    /// 原理：微信 4.x 的消息区是一整块自绘画布，UIA 完全读不到
+    /// （连开了无障碍桥也只有 1 个元素）。但**鼠标在消息区拖一下
+    /// 会形成一次文字选择**，再按 Ctrl+C，微信就把选中的消息以纯文本
+    /// 放进剪贴板：
+    ///     发送者\n2026年09月18日 17:05\n内容\n\n（下一条…）
+    /// 这是唯一走得通的自动读取路径 —— 键盘那条（Ctrl+A 全选）微信压根没有，
+    /// 实测 8 种挪焦点的办法全部失败。
+    ///
+    /// 坐标**不按窗口比例算**：左侧图标栏和会话列表是固定像素宽的
+    /// （约 390px），按比例在窄窗口下会掉进会话列表里（窗口宽 800 时
+    /// x=0.40 只有 320px，已经在会话列表上了）。改成从右边缘/下边缘算
+    /// 固定内缩，就跟窗口宽度无关了。窗口**移动**本来就无所谓 ——
+    /// 每次都重新 GetWindowRect，SetCursorPos 用的是绝对屏幕坐标。
+    ///
+    /// 三道闸跟发送时完全一样：任一不过，一个键都不按。
+    /// </summary>
+    private static string PullMessages()
+    {
+        if (!ActivateWeChat()) { Log("拉取失败: 无法把微信切到前台，已中止"); return null; }
+        if (!WeChatIsForeground()) { Log("拉取失败: 前台校验未通过，已中止"); return null; }
+        if (!WeChatLooksLoggedIn(_wechatHwnd)) { Log("拉取失败: 微信看起来停在登录界面，已中止"); return null; }
+
+        RECT wr;
+        GetWindowRect(_wechatHwnd, out wr);
+
+        int x = wr.Right - 120;      // 距右边缘：保证落在消息面板里
+        int yTop = wr.Top + 140;     // 距上边缘：跳过会话标题栏
+        int bot = 170;               // 距下边缘：跳过输入框
+
+        // 输入框高度随草稿行数变化，所以底部内缩要能兜底：
+        // 万一拖进了输入框（把草稿选中了），结果里不会有"年月日"那行，
+        // 那就加大内缩再试一次。
+        string pulled = null;
+        int[] botTries = { bot, bot + 130, bot + 280 };
+        foreach (int bt in botTries)
+        {
+            int yBot = wr.Bottom - bt;
+            if (yBot <= yTop + 40) continue;      // 消息区太矮，别拖了
+            pulled = DragAndCopy(x, yBot, x, yTop);
+            if (LooksLikeDump(pulled)) break;
+        }
+
+        Log("拉取消息: " + (pulled == null ? "剪贴板没变化（消息区是空的？）"
+                                           : pulled.Length + " 字符"));
+        return pulled;
+    }
+
+    /// <summary>
+    /// 在微信消息区从 (ax,ay) 拖到 (bx,by) 形成一次文字选择，然后 Ctrl+C。
+    /// 返回剪贴板里拿到的内容；没拿到返回 null。
+    ///
+    /// 为什么用拖拽而不是点击：拖动过程中不会触发消息里的链接，
+    /// 所以即使起点正好落在某条消息上也安全。
+    /// </summary>
+    private static string DragAndCopy(int ax, int ay, int bx, int by)
+    {
+        uint before = GetClipboardSequenceNumber();
+
+        SetCursorPos(ax, ay);
+        Thread.Sleep(140);
+        mouse_event(MeLeftdown, 0, 0, 0, IntPtr.Zero);
+        Thread.Sleep(140);
+        for (int i = 1; i <= 12; i++)      // 分步移动：一步跳过去控件不认
+        {
+            SetCursorPos(ax + (bx - ax) * i / 12, ay + (by - ay) * i / 12);
+            Thread.Sleep(45);
+        }
+        Thread.Sleep(180);
+        mouse_event(MeLeftup, 0, 0, 0, IntPtr.Zero);
+        Thread.Sleep(450);
+
+        SendKey(VkControl, false); SendKey(VkC, false);
+        SendKey(VkC, true); SendKey(VkControl, true);
+        Thread.Sleep(550);
+
+        // 把这次 Ctrl+C 标记成"我们自己按的"，免得剪贴板监听线程
+        // 把它当成用户操作又推一遍给页面。
+        //
+        // 这里**故意不发 Esc**：早先为了清残留选择状态加过一句 Esc，
+        // 之后微信窗口就被收进了托盘（vis=False），后续全部失效。
+        // 实测拖选完界面上本来就看不到任何残留，不需要清。
+        _lastSentSeq = GetClipboardSequenceNumber();
+        _lastSentText = "";
+
+        if (GetClipboardSequenceNumber() == before) return null;
+        string t = GetClipboardText();
+        return (t != null && t.Length > 0) ? t : null;
+    }
+
+    /// <summary>
+    /// 微信把选中的消息导成纯文本时，每条都带一行"2026年09月18日 17:05"。
+    /// 用这个特征区分"拖到了消息区"和"拖进了输入框、把草稿选中了"。
+    /// </summary>
+    private static bool LooksLikeDump(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return false;
+        return System.Text.RegularExpressions.Regex.IsMatch(s, @"\d{4}年\d{1,2}月\d{1,2}日");
+    }
+
+    /// <summary>按一下组合键（modifier 传 0 就是单键）。</summary>
+    private static void Tapping(ushort modifier, ushort key)
+    {
+        if (modifier != 0) SendKey(modifier, false);
+        SendKey(key, false);
+        SendKey(key, true);
+        if (modifier != 0) SendKey(modifier, true);
     }
 
     /// <summary>
@@ -720,6 +910,18 @@ internal static class Bridge
                 return;
             }
 
+            if (path.StartsWith("/pull"))
+            {
+                string pulled = PullMessages();
+                string body = "{\"ok\":" + (pulled != null ? "true" : "false")
+                            + ",\"len\":" + (pulled == null ? 0 : pulled.Length)
+                            + ",\"text\":\"" + JsonEscape(pulled == null ? "" : pulled) + "\"}";
+                WriteHttp(stream, "200 OK", "application/json; charset=utf-8",
+                          Encoding.UTF8.GetBytes(body));
+                client.Close();
+                return;
+            }
+
             if (path.StartsWith("/shot"))
             {
                 bool fromScreen = path.IndexOf("screen=1") >= 0;
@@ -892,6 +1094,17 @@ internal static class Bridge
                 {
                     EnsureWeChat();
                     WsSendText(client, Msg("status", "wechat", WeChatState()));
+                }
+                else if (type == "pull")
+                {
+                    // 页面走 WS 而不是 fetch：file:// 页面用 fetch 打本地端口
+                    // 有 CORS / 本地网络访问（LNA）的风险，而 WS 早就验证可用。
+                    WsSendText(client, "{\"type\":\"pulling\"}");
+                    string pulled = PullMessages();
+                    WsSendText(client, "{\"type\":\"pulled\",\"ok\":"
+                                     + (pulled != null ? "true" : "false")
+                                     + ",\"len\":" + (pulled == null ? 0 : pulled.Length)
+                                     + ",\"text\":\"" + JsonEscape(pulled == null ? "" : pulled) + "\"}");
                 }
             }
         }
