@@ -132,11 +132,21 @@ def main():
                     help="发一条 send 消息（JSON 在 Python 里拼，绕开 shell 引号问题）")
     ap.add_argument("--status", action="store_true",
                     help="发 type:status —— 安全，不碰微信、不按键")
+    ap.add_argument("--pull", action="store_true",
+                    help="发 type:pull —— 真去微信消息区拖一个细长方形再 Ctrl+C")
+    ap.add_argument("--autopull", choices=["on", "off"],
+                    help="开/关「收到消息自动拉取」")
     ap.add_argument("--timeout", type=float, default=10.0,
                     help="等回执的秒数；send 会走微信，建议给大一点")
     args = ap.parse_args()
 
-    if args.send is not None:
+    if args.pull:
+        message = json.dumps({"type": "pull"})
+        want = '"pulled"'
+    elif args.autopull:
+        message = json.dumps({"type": "autopull", "on": args.autopull == "on"})
+        want = '"autoPull"'
+    elif args.send is not None:
         message = json.dumps({"type": "send", "text": args.send}, ensure_ascii=False)
         want = '"sent"'
     elif args.status:

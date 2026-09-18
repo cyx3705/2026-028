@@ -219,13 +219,19 @@
   </p>
 
   <div class="row">
-    <button class="act" id="btnPull">📥 拉取最近消息（自动）</button>
+    <button class="act" id="btnPull">📥 拉取最近消息（手动）</button>
+    <label class="fine" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">
+      <input type="checkbox" id="chkAutoPull" checked>
+      收到消息自动拉取
+    </label>
   </div>
   <p class="fine">
-    桥会自动切到微信 → 在消息区拖选可见消息 → <code>Ctrl+C</code> 复制回来。
+    桥会自动切到微信 → 沿<strong>右侧头像列拖一个细长方形</strong> → <code>Ctrl+C</code> 复制回来。
     <strong>中文原样显示，密文自动解密</strong>，取最近 5 条。
-    <br><span style="color:var(--dim)">代价：这一下会切走焦点并占用剪贴板。
-    只拉当前对话里<strong>看得见</strong>的消息。</span>
+    <br>勾上「自动拉取」后，**微信因新消息自己切到前台**时桥会自动拉一次：
+    光标会放回原处、你的剪贴板内容也会被还原，所以不打断你手上的活。
+    <br><span style="color:var(--dim)">仍然只拉当前对话里<strong>看得见</strong>的消息；
+    拖的必须是长方形，一条线微信不认（会读到上一次的旧剪贴板）。</span>
   </p>
 
   <hr style="border:0;border-top:1px solid var(--line);margin:13px 0 11px">
@@ -704,10 +710,23 @@ var Bridge = (function(){
     return true;
   }
 
+  /**
+   * 开关「收到消息自动拉取」。
+   *
+   * 判定在桥那边做：微信 4.x 收到新消息不走系统通知中心，也不弹 toast，
+   * 而是直接把自己的主窗口切到前台 —— 桥挂的就是这个前台事件。
+   */
+  function setAutoPull(on){
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type:"autopull", on: !!on }));
+    return true;
+  }
+
   return {
     connect: connect,
     send: send,
     pull: pull,
+    setAutoPull: setAutoPull,
     isConnected: function(){ return connected; },
     onText: function(f){ onText = f; },
     onState: function(f){ onState = f; }
@@ -1025,6 +1044,11 @@ Bridge.onState(function(kind, arg){
   }
   else if (kind === "pulling") { setStatus("正在从微信拉取…", "wait"); }
   else if (kind === "pulled") { onPulled(arg); }
+  else if (kind === "autoPull") {
+    // 桥确认了开关状态，把界面同步过去（比如桥重启后回到默认开启）。
+    var box = $("chkAutoPull");
+    if (box && arg && typeof arg.on === "boolean") box.checked = arg.on;
+  }
 });
 
 Bridge.onText(function(text){
@@ -1374,35 +1398,97 @@ function parseWeChatDump(text){
   return out;
 }
 
+var lastPullText = "";
+var prevPullContents = [];      // 上一次拉回来的消息内容，见 onlyNewMessages
+
+/** cur 是否完整出现在 prev 里（连续子序列）；返回起始下标或 -1。 */
+function seqIndex(prev, cur){
+  if (!cur.length) return 0;
+  for (var s = 0; s + cur.length <= prev.length; s++) {
+    var ok = true;
+    for (var i = 0; i < cur.length; i++) if (prev[s + i] !== cur[i]) { ok = false; break; }
+    if (ok) return s;
+  }
+  return -1;
+}
+
+/**
+ * 挑出真正新增的那几条消息。
+ *
+ * 微信不给你"从某条之后"的增量 —— 每次拖选拿到的都是**当前看得见的那一整屏**，
+ * 相邻两次大面积重叠。直接整屏处理的话，每来一条新消息就会把屏幕上所有旧消息
+ * 重新显示一遍（密文那条靠 AES-GCM 的计数器挡得住，中文那条挡不住）。
+ *
+ * 做法：先看整屏是不是都见过（比如往上滚了一屏），否则找 prev 的后缀和 cur 的
+ * 前缀最长的重叠，重叠之后的部分才算新的。
+ */
+function onlyNewMessages(prev, cur){
+  if (!cur.length) return [];
+  if (!prev.length) return cur;
+  if (seqIndex(prev, cur) >= 0) return [];      // 整屏都见过
+  var max = Math.min(prev.length, cur.length);
+  for (var j = max; j > 0; j--) {
+    var ok = true;
+    for (var i = 0; i < j; i++)
+      if (prev[prev.length - j + i] !== cur[i]) { ok = false; break; }
+    if (ok) return cur.slice(j);
+  }
+  return cur;                                   // 完全接不上，就当全是新的
+}
+
 function onPulled(m){
   setStatus("桥已连接", "on");
   // 拉取用的那一下 Ctrl+C 会被剪贴板监听线程也捕获到，
   // 于是页面会同时收到"pulled 回复"和"clipboard 推送"两份 ——
   // 不过滤的话每条消息都会显示两遍。监听是 400ms 轮询，所以留 2.5 秒窗口。
+  // （桥那边现在也会在拉取期间直接不推，这里是第二道保险。）
   pullingUntil = Date.now() + 2500;
+
+  var isAuto = !!m.auto;
   if (!m.ok) {
-    addSys("拉取失败：桥说微信里没读到内容（消息区是空的？还是拖的位置不对）", "bad");
-    beacon("pull-empty");
+    // 自动拉取失败是家常便饭（微信切到前台但对话是空的），别刷屏。
+    if (!isAuto) {
+      addSys("拉取失败：桥说微信里没读到内容（消息区是空的？还是拖的位置不对）", "bad");
+      beacon("pull-empty");
+    }
     return;
   }
+
+  // 快路径：整屏原文一个字没变，直接收工。
+  if (isAuto && m.text === lastPullText) return;
+  lastPullText = m.text;
+
   var msgs = parseWeChatDump(m.text);
   if (!msgs.length) {
-    addSys("拉回来 " + m.len + " 字符，但一条消息都解析不出来", "bad");
-    beacon("pull-parse-fail", "len=" + m.len);
+    if (!isAuto) {
+      addSys("拉回来 " + m.len + " 字符，但一条消息都解析不出来", "bad");
+      beacon("pull-parse-fail", "len=" + m.len);
+    }
     return;
   }
-  var take = msgs.slice(-5);      // 只处理最近 5 条
-  addSys("🧲 从微信拉回 " + msgs.length + " 条（" + m.len + " 字符），取最近 "
-         + take.length + " 条处理", "ok");
+
+  var fresh = onlyNewMessages(prevPullContents, msgs);
+  prevPullContents = msgs.slice(-40);           // 只留尾巴，算重叠足够了
+
+  if (!fresh.length) {
+    if (!isAuto) addSys("拉回 " + msgs.length + " 条，里面没有新消息", "ok");
+    beacon("pull-none", "n=" + msgs.length);
+    return;
+  }
+
+  var take = fresh.slice(-5);                   // 只处理最近 5 条新的
+  addSys((isAuto ? "📩 微信来了消息，自动拉到 " : "🧲 从微信拉回 ") + msgs.length
+         + " 条（其中 " + fresh.length + " 条是新的，处理 " + take.length + " 条）", "ok");
   for (var i = 0; i < take.length; i++) handleIncoming(take[i], "wechat-pull");
-  beacon("pull-ok", "n=" + msgs.length);
+  beacon("pull-ok", "n=" + msgs.length + " fresh=" + fresh.length + (isAuto ? " auto=1" : ""));
 }
 
 function pullRecent(){
   beacon("pull-click");
   if (!Bridge.isConnected()) { addSys("拉取失败：桥没连上", "bad"); return; }
   pullingUntil = Date.now() + 20000;      // 从发出到拿到结果，这段时间内屏蔽推送
-  addSys("正在让桥去微信里拉取（会切到微信、在消息区拖一下再复制）…");
+  lastPullText = "";                      // 手动拉取永远重新处理，不做"和上次一样"的去重
+  addSys("正在让桥去微信里拉取（会切到微信、沿右侧头像列拖一个长方形再复制）…");
   if (!Bridge.pull()) {
     pullingUntil = 0;
     addSys("拉取失败：WebSocket 没打开", "bad");
@@ -1410,6 +1496,16 @@ function pullRecent(){
 }
 
 $("btnPull").addEventListener("click", pullRecent);
+
+$("chkAutoPull").addEventListener("change", function(){
+  var on = this.checked;
+  if (!Bridge.setAutoPull(on)) {
+    addSys("自动拉取开关没能发给桥（桥没连上）", "bad");
+    return;
+  }
+  addSys(on ? "自动拉取：开 —— 微信因新消息切到前台时桥会自己拉一次"
+            : "自动拉取：关 —— 只能手动点「拉取最近消息」", "ok");
+});
 
 $("btnCopyKey").addEventListener("click", function(){
   copyText(Crypto.myKeyEnvelope());

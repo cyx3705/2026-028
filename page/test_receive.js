@@ -125,6 +125,7 @@ eval(m[1] + `
   recvManual: recvManual,
   parseWeChatDump: parseWeChatDump,
   onPulled: onPulled,
+  onlyNewMessages: onlyNewMessages,
   refreshPills: refreshPills,
   PREFIX_KEY: PREFIX_KEY,
   PREFIX_MSG: PREFIX_MSG,
@@ -388,6 +389,46 @@ const settle = () => new Promise(r => setTimeout(r, 60));
 
   P.onPulled({ ok: false });
   check(logHas("拉取失败"), "拉取结果：ok=false 时有明确提示");
+
+  // ---------- 增量：每次拉到的都是"看得见的一整屏"，相邻两次大量重叠 ----------
+  const A = ["一", "二", "三", "四"];
+  check(JSON.stringify(P.onlyNewMessages([], A)) === JSON.stringify(A),
+        "增量：第一次拉取全都是新的");
+  check(P.onlyNewMessages(A, A).length === 0,
+        "增量：整屏没变 -> 没有新的");
+  check(JSON.stringify(P.onlyNewMessages(A, ["三", "四"])) === "[]",
+        "增量：往上滚了一屏（整屏都见过）-> 没有新的");
+  check(JSON.stringify(P.onlyNewMessages(A, ["二", "三", "四", "五"])) === '["五"]',
+        "增量：多了一条 -> 只挑出那一条",
+        JSON.stringify(P.onlyNewMessages(A, ["二", "三", "四", "五"])));
+  check(JSON.stringify(P.onlyNewMessages(["一", "二"], ["九", "十"])) === '["九","十"]',
+        "增量：完全接不上 -> 当全是新的");
+
+  // ---------- 自动拉取（桥在微信切到前台时自己触发，页面没点按钮）----------
+  const dumpAuto = ["Pinavia", "2026年09月18日 17:30", "自动拉到的第一条"].join("\n");
+  const a0 = $(("log")).children.length;
+  P.onPulled({ ok: true, len: dumpAuto.length, text: dumpAuto, auto: true });
+  await settle();
+  check($(("log")).children.length > a0, "自动拉取：第一次会处理");
+  check(logHas("自动拉到"), "自动拉取：日志说明这是自动拉的");
+
+  const a1 = $(("log")).children.length;
+  P.onPulled({ ok: true, len: dumpAuto.length, text: dumpAuto, auto: true });
+  await settle();
+  check($(("log")).children.length === a1,
+        "自动拉取：同一屏内容第二次不再重复处理",
+        $(("log")).children.length + " vs " + a1);
+
+  const a2 = $(("log")).children.length;
+  P.onPulled({ ok: false, auto: true });
+  await settle();
+  check($(("log")).children.length === a2, "自动拉取：失败保持安静，不刷屏");
+
+  const dumpAuto2 = dumpAuto + "\n\nPinavia\n2026年09月18日 17:31\n自动拉到的第二条";
+  const a3 = $(("log")).children.length;
+  P.onPulled({ ok: true, len: dumpAuto2.length, text: dumpAuto2, auto: true });
+  await settle();
+  check($(("log")).children.length > a3, "自动拉取：多了一条就继续处理");
 
   console.log("");
   console.log("通过 " + pass + " / " + (pass + fail));

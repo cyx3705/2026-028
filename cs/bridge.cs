@@ -60,6 +60,14 @@ internal static class Bridge
     private static IntPtr _wechatHwnd = IntPtr.Zero;
     private static int _wechatPid = 0;
 
+    // 自动拉取：微信因为收到新消息把自己切到前台时，自动拉一次。
+    private static volatile bool _autoPull = true;
+    private static int _autoPullPending = 0;
+    private static DateTime _lastAutoPull = DateTime.MinValue;
+    private static DateTime _autoPullQuietUntil = DateTime.MinValue;
+    private static string _lastPullNote = "从未拉取";
+    private static DateTime _suppressClipboardUntil = DateTime.MinValue;
+
     // ------------------------------------------------------------------
     // Win32 interop
     // ------------------------------------------------------------------
@@ -130,6 +138,34 @@ internal static class Bridge
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
     [DllImport("user32.dll")] private static extern IntPtr GetWindowDC(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] private static extern bool PeekMessage(out MSG m, IntPtr hWnd, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG m);
+    [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG m);
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr hmod, WinEventProc cb,
+                                                 uint pid, uint thread, uint flags);
+    [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
+
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam, lParam;
+        public uint time;
+        public POINT pt;
+    }
+
+    private delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd,
+                                       int idObject, int idChild, uint thread, uint time);
+
+    private const uint EventSystemForeground = 0x0003;
+    private const uint WineventOutofcontext = 0x0000;
+    private const uint PmRemove = 0x0001;
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("kernel32.dll")] private static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
     [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr hMem);
@@ -447,6 +483,10 @@ internal static class Bridge
         SendInput(1, seq, Marshal.SizeOf(typeof(INPUT)));
     }
 
+    // 拖选几何（见 PullMessages 里 2026-09-18 的修正说明）
+    private const int PullXOuter = 30;   // 起点：距右边缘，落在头像右缘
+    private const int PullXInner = 70;   // 终点：距右边缘，落在气泡右缘
+
     /// <summary>
     /// 拉取当前对话里可见消息的纯文本（拿不到返回 null）。
     ///
@@ -465,9 +505,25 @@ internal static class Bridge
     /// 每次都重新 GetWindowRect，SetCursorPos 用的是绝对屏幕坐标。
     ///
     /// 三道闸跟发送时完全一样：任一不过，一个键都不按。
+    ///
+    /// 【2026-09-18 修正】拖的必须是**细长方形**，不能是一条竖线。
+    /// 实测（临时探针 probe.exe，每种拖法都比对剪贴板序号）：
+    ///     零宽度的竖线 right-51 ...... 剪贴板序号根本没变 —— 什么都没选中，
+    ///                                  读到的是上一次留在剪贴板里的旧内容
+    ///     细长方形 right-30->right-70  每次都更新（FRESH），可重复
+    /// 也就是说在这之前"自动拉取成功"有一部分是在读旧剪贴板。
+    ///
+    /// x 取 30..70：实测这个窗口里自己的头像列就在距右边缘 31..66 px，
+    /// 气泡文字的右边缘在 79 px 处。取 30..70 正好盖住头像列、压不到文字，
+    /// 跟"沿右侧头像处拖"这个要求一致（窗口 1115 宽时量的）。
     /// </summary>
-    private static string PullMessages()
+    private static string PullMessages(string why, bool keepClipboard)
     {
+        // 先把用户当前的前台窗口和剪贴板留一份底，拉完要还回去。
+        IntPtr prevFg = GetForegroundWindow();
+        bool wechatWasFg = prevFg == _wechatHwnd;
+        string prevClip = keepClipboard ? GetClipboardText() : null;
+
         if (!ActivateWeChat()) { Log("拉取失败: 无法把微信切到前台，已中止"); return null; }
         if (!WeChatIsForeground()) { Log("拉取失败: 前台校验未通过，已中止"); return null; }
         if (!WeChatLooksLoggedIn(_wechatHwnd)) { Log("拉取失败: 微信看起来停在登录界面，已中止"); return null; }
@@ -475,9 +531,10 @@ internal static class Bridge
         RECT wr;
         GetWindowRect(_wechatHwnd, out wr);
 
-        int x = wr.Right - 120;      // 距右边缘：保证落在消息面板里
-        int yTop = wr.Top + 140;     // 距上边缘：跳过会话标题栏
-        int bot = 170;               // 距下边缘：跳过输入框
+        int xOuter = wr.Right - PullXOuter;
+        int xInner = wr.Right - PullXInner;
+        int yTop = wr.Top + 70;      // 距上边缘：刚好跳过会话标题栏，够到最上面一条
+        int bot = 110;               // 距下边缘：跳过输入框
 
         // 输入框高度随草稿行数变化，所以底部内缩要能兜底：
         // 万一拖进了输入框（把草稿选中了），结果里不会有"年月日"那行，
@@ -486,15 +543,165 @@ internal static class Bridge
         int[] botTries = { bot, bot + 130, bot + 280 };
         foreach (int bt in botTries)
         {
+            EnsureWeChat();
+            if (_wechatHwnd == IntPtr.Zero) break;
+            GetWindowRect(_wechatHwnd, out wr);
             int yBot = wr.Bottom - bt;
             if (yBot <= yTop + 40) continue;      // 消息区太矮，别拖了
-            pulled = DragAndCopy(x, yBot, x, yTop);
+            pulled = DragAndCopy(wr.Right - PullXOuter, yBot, wr.Right - PullXInner, yTop);
             if (LooksLikeDump(pulled)) break;
         }
 
-        Log("拉取消息: " + (pulled == null ? "剪贴板没变化（消息区是空的？）"
-                                           : pulled.Length + " 字符"));
+        string preview = pulled == null ? "" : pulled.Replace("\r", " ").Replace("\n", " ");
+        if (preview.Length > 70) preview = preview.Substring(0, 70);
+        _lastPullNote = DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + " " + why + "拉取"
+                      + (pulled == null ? "没读到内容" : "拿到 " + pulled.Length + " 字符")
+                      + (preview.Length == 0 ? "" : " | " + preview);
+        Log("拉取消息(" + why + "): " + (pulled == null ? "剪贴板没变化（消息区是空的？）"
+                                                        : pulled.Length + " 字符"));
+
+        // 自动拉取不抢用户的剪贴板：把原来的内容写回去。
+        // 只在剪贴板里还是我们刚放进去的东西时才还原，避免踩掉用户此刻的复制。
+        if (keepClipboard && prevClip != null && GetClipboardText() == pulled)
+        {
+            if (SetClipboardText(prevClip))
+            {
+                // 还原本身也会改剪贴板序号，得认成"自己造成的"，
+                // 否则剪贴板监听线程会把还原的内容当成用户复制推给页面。
+                _lastSentSeq = GetClipboardSequenceNumber();
+                _lastSentText = prevClip;
+            }
+        }
+
+        // 自动拉取不抢焦点：把用户原来的前台窗口还回去。
+        if (!wechatWasFg) RestoreForeground(prevFg);
+
         return pulled;
+    }
+
+    /// <summary>把前台还给用户原来的窗口（拉取结束后用）。</summary>
+    private static void RestoreForeground(IntPtr target)
+    {
+        if (target == IntPtr.Zero || target == _wechatHwnd) return;
+        if (!IsWindow(target)) return;
+
+        uint dummy;
+        uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out dummy);
+        uint ourThread = GetCurrentThreadId();
+        bool attached = false;
+        try
+        {
+            if (fgThread != ourThread) attached = AttachThreadInput(fgThread, ourThread, true);
+            SetForegroundWindow(target);
+        }
+        catch { }
+        finally { if (attached) AttachThreadInput(fgThread, ourThread, false); }
+    }
+
+    /// <summary>
+    /// 那个像素真的属于微信吗？
+    ///
+    /// 第四道闸。踩过：微信不是最前面那个窗口时，光标底下其实是 Solid Edge，
+    /// 一拖就在别人的模型上拉了个框。鼠标拖拽是按屏幕坐标打到**最上面**那个
+    /// 窗口上的，所以拖之前必须先问一句 WindowFromPoint。
+    /// </summary>
+    private static bool PixelBelongsToWeChat(int x, int y)
+    {
+        POINT p; p.X = x; p.Y = y;
+        IntPtr h = WindowFromPoint(p);
+        if (h == IntPtr.Zero) return false;
+
+        uint pid;
+        GetWindowThreadProcessId(h, out pid);
+        if (_wechatPid != 0 && pid == (uint)_wechatPid) return true;
+
+        Log("拉取中止: 像素(" + x + "," + y + ")属于 hwnd=" + h + " pid=" + pid
+            + " class=" + ClassOf(h) + "，不是微信");
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // 自动拉取：等微信自己把窗口切到前台，再去读
+    //
+    // 实测（临时探针 probe.exe events，用户从手机发消息）：
+    //   18:05:12 HOOK ev=0x0003 pid=19576 hwnd=263490 class=Qt51514QWindowIcon title=微信
+    //   18:05:13 FG wechat foreground=True
+    // 微信 4.x 收到消息**不走 Windows 通知中心**，全程没有新建任何 toast 窗口，
+    // 而是直接把自己的主窗口激活到前台。所以能挂钩子的信号就是
+    // EVENT_SYSTEM_FOREGROUND 打在微信自己的窗口上。
+    //
+    // 这样一来"收到消息后自动拉取"并不额外抢焦点 —— 微信已经先抢了。
+    // 我们只做三件不打扰的事：拉完把前台还给用户原来的窗口、把光标放回原处、
+    // 把剪贴板写回原来的内容。
+    //
+    // 另外还挂了一道自锁：拉取本身会把微信切到前台，那也会触发这个事件，
+    // 所以拉取前后各安静一段时间，不然会自己触发自己。
+    // ------------------------------------------------------------------
+
+    // 这个静态字段是必须的，不是洁癖。
+    //
+    // SetWinEventHook 只拿走一个函数指针，托管侧那个隐式生成的委托
+    // 没有任何东西引用它 —— 一次 GC 之后就被回收，钩子从此再也不回调，
+    // 而且不报任何错。实测就是这样：启动后触发过一次，之后彻底安静。
+    // 放在静态字段里让 GC 一直看得见它。
+    private static readonly WinEventProc _foregroundHookProc = WeChatForegroundHook;
+
+    private static void WeChatForegroundHook(IntPtr hook, uint ev, IntPtr hwnd,
+                                            int idObject, int idChild, uint thread, uint time)
+    {
+        if (!_autoPull) return;
+        if (ev != EventSystemForeground) return;
+        if (DateTime.Now < _autoPullQuietUntil) return;
+
+        uint pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        if (_wechatPid == 0 || pid != (uint)_wechatPid) return;
+
+        Interlocked.Exchange(ref _autoPullPending, 1);
+        Log("自动拉取: 微信切到前台，已排队");
+    }
+
+    private static void AutoPullLoop()
+    {
+        IntPtr hook = SetWinEventHook(EventSystemForeground, EventSystemForeground, IntPtr.Zero,
+                                      _foregroundHookProc, 0, 0, WineventOutofcontext);
+        if (hook == IntPtr.Zero)
+        {
+            Log("自动拉取: 挂钩子失败，已停用（手动拉取不受影响）");
+            return;
+        }
+        Log("自动拉取: 已开启（微信因新消息切到前台时触发）");
+
+        MSG msg;
+        while (true)
+        {
+            // out-of-context 的钩子是把事件当消息投到这个线程的队列里的，
+            // 不抽消息回调永远不会被调用。（第一版就栽在这，什么事件都收不到。）
+            while (PeekMessage(out msg, IntPtr.Zero, 0, 0, PmRemove))
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+
+            bool fire = Interlocked.Exchange(ref _autoPullPending, 0) == 1;
+            if (fire && (DateTime.Now - _lastAutoPull).TotalMilliseconds >= 2500)
+            {
+                _lastAutoPull = DateTime.Now;
+                _autoPullQuietUntil = DateTime.Now.AddSeconds(6);   // 别自己触发自己
+                Thread.Sleep(500);                                  // 等消息渲染出来
+
+                EnsureWeChat();
+                string pulled = PullMessages("自动", true);
+                Log(_lastPullNote);
+
+                if (pulled != null && LooksLikeDump(pulled))
+                {
+                    Broadcast("{\"type\":\"pulled\",\"ok\":true,\"auto\":true,\"len\":" + pulled.Length
+                              + ",\"text\":\"" + JsonEscape(pulled) + "\"}");
+                }
+            }
+            Thread.Sleep(60);
+        }
     }
 
     /// <summary>
@@ -506,33 +713,54 @@ internal static class Bridge
     /// </summary>
     private static string DragAndCopy(int ax, int ay, int bx, int by)
     {
+        // 第四道闸：起终点像素都必须真的属于微信，否则一个键都不按。
+        if (!PixelBelongsToWeChat(ax, ay)) return null;
+        if (!PixelBelongsToWeChat(bx, by)) return null;
+
+        // 这次 Ctrl+C 包括事后还原剪贴板，全程别让监听线程往外推。
+        _suppressClipboardUntil = DateTime.Now.AddSeconds(5);
+        // 拖选必须把微信切到前台，那也会触发自动拉取的钩子 —— 安静一会儿，别自己触发自己。
+        _autoPullQuietUntil = DateTime.Now.AddSeconds(8);
+
         uint before = GetClipboardSequenceNumber();
 
-        SetCursorPos(ax, ay);
-        Thread.Sleep(140);
-        mouse_event(MeLeftdown, 0, 0, 0, IntPtr.Zero);
-        Thread.Sleep(140);
-        for (int i = 1; i <= 12; i++)      // 分步移动：一步跳过去控件不认
+        POINT saved;
+        GetCursorPos(out saved);
+
+        try
         {
-            SetCursorPos(ax + (bx - ax) * i / 12, ay + (by - ay) * i / 12);
-            Thread.Sleep(45);
+            SetCursorPos(ax, ay);
+            Thread.Sleep(140);
+            mouse_event(MeLeftdown, 0, 0, 0, IntPtr.Zero);
+            Thread.Sleep(140);
+            for (int i = 1; i <= 12; i++)      // 分步移动：一步跳过去控件不认
+            {
+                SetCursorPos(ax + (bx - ax) * i / 12, ay + (by - ay) * i / 12);
+                Thread.Sleep(45);
+            }
+            Thread.Sleep(180);
+            mouse_event(MeLeftup, 0, 0, 0, IntPtr.Zero);
+            Thread.Sleep(450);
+
+            SendKey(VkControl, false); SendKey(VkC, false);
+            SendKey(VkC, true); SendKey(VkControl, true);
+            Thread.Sleep(550);
+
+            // 把这次 Ctrl+C 标记成"我们自己按的"，免得剪贴板监听线程
+            // 把它当成用户操作又推一遍给页面。
+            //
+            // 这里**故意不发 Esc**：早先为了清残留选择状态加过一句 Esc，
+            // 之后微信窗口就被收进了托盘（vis=False），后续全部失效。
+            // 实测拖选完界面上本来就看不到任何残留，不需要清。
+            _lastSentSeq = GetClipboardSequenceNumber();
+            _lastSentText = "";
         }
-        Thread.Sleep(180);
-        mouse_event(MeLeftup, 0, 0, 0, IntPtr.Zero);
-        Thread.Sleep(450);
-
-        SendKey(VkControl, false); SendKey(VkC, false);
-        SendKey(VkC, true); SendKey(VkControl, true);
-        Thread.Sleep(550);
-
-        // 把这次 Ctrl+C 标记成"我们自己按的"，免得剪贴板监听线程
-        // 把它当成用户操作又推一遍给页面。
-        //
-        // 这里**故意不发 Esc**：早先为了清残留选择状态加过一句 Esc，
-        // 之后微信窗口就被收进了托盘（vis=False），后续全部失效。
-        // 实测拖选完界面上本来就看不到任何残留，不需要清。
-        _lastSentSeq = GetClipboardSequenceNumber();
-        _lastSentText = "";
+        finally
+        {
+            // 把用户的光标放回原处。拖选期间它必须真的移过去（mouse_event
+            // 是按屏幕坐标打真实鼠标输入的），所以只能在结束后还原。
+            SetCursorPos(saved.X, saved.Y);
+        }
 
         if (GetClipboardSequenceNumber() == before) return null;
         string t = GetClipboardText();
@@ -836,6 +1064,21 @@ internal static class Bridge
                 string text = GetClipboardText();
                 if (string.IsNullOrEmpty(text)) continue;
 
+                // 拉取期间一律不推。拉取本身就是"拖选 + Ctrl+C"，
+                // 那个 Ctrl+C 一定会让剪贴板序号跳一次，而 _lastSentSeq 是在
+                // 按完之后才写的 —— 监听线程 400ms 一轮，完全来得及在那之前
+                // 就把这一次抓走（实测就抓到了，日志里紧挨着一条
+                // "剪贴板变化 -> 推给网页"）。
+                //
+                // 手动拉取时页面用 pullingUntil 挡得住，但**自动拉取不是页面发起的**，
+                // 页面不知道，于是同一条消息会被处理两遍（clipboard + pulled）。
+                // 所以这道闸必须在桥这边。
+                if (DateTime.Now < _suppressClipboardUntil)
+                {
+                    Log("剪贴板变化 忽略（拉取期间，共 " + text.Length + " 字符）");
+                    continue;
+                }
+
                 // 跳过"我们自己刚粘进去"的那一次变化。
                 //
                 // 这里原来只有 `if (text == _lastSentText) continue;` —— 那是错的：
@@ -912,7 +1155,7 @@ internal static class Bridge
 
             if (path.StartsWith("/pull"))
             {
-                string pulled = PullMessages();
+                string pulled = PullMessages("手动", false);
                 string body = "{\"ok\":" + (pulled != null ? "true" : "false")
                             + ",\"len\":" + (pulled == null ? 0 : pulled.Length)
                             + ",\"text\":\"" + JsonEscape(pulled == null ? "" : pulled) + "\"}";
@@ -978,6 +1221,8 @@ internal static class Bridge
                          + ",\"loggedIn\":" + (have && WeChatLooksLoggedIn(_wechatHwnd) ? "true" : "false")
                          + ",\"size\":\"" + (have ? WindowSizeText(_wechatHwnd) : "-") + "\""
                          + ",\"foreground\":" + (WeChatIsForeground() ? "true" : "false")
+                         + ",\"autoPull\":" + (_autoPull ? "true" : "false")
+                         + ",\"lastPull\":\"" + JsonEscape(_lastPullNote) + "\""
                          + ",\"clients\":" + Clients.Count + "}";
                 WriteHttp(stream, "200 OK", "application/json; charset=utf-8", Encoding.UTF8.GetBytes(j));
                 client.Close();
@@ -1095,12 +1340,29 @@ internal static class Bridge
                     EnsureWeChat();
                     WsSendText(client, Msg("status", "wechat", WeChatState()));
                 }
+                else if (type == "autopull")
+                {
+                    // JSON 的 true 到这里是 .NET 的 Boolean，Convert.ToString 出来是
+                    // "True"（大写 T）—— 直接比字面量 "true" 永远不成立，
+                    // 表现就是"开关只能关不能开"。两种形态都要认。
+                    object onObj;
+                    bool on = false;
+                    if (msg.TryGetValue("on", out onObj) && onObj != null)
+                    {
+                        if (onObj is bool) on = (bool)onObj;
+                        else on = Convert.ToString(onObj).Equals("true", StringComparison.OrdinalIgnoreCase);
+                    }
+                    _autoPull = on;
+                    _autoPullQuietUntil = DateTime.Now.AddSeconds(3);
+                    Log("自动拉取: " + (on ? "开启" : "关闭"));
+                    WsSendText(client, "{\"type\":\"autoPull\",\"on\":" + (on ? "true" : "false") + "}");
+                }
                 else if (type == "pull")
                 {
                     // 页面走 WS 而不是 fetch：file:// 页面用 fetch 打本地端口
                     // 有 CORS / 本地网络访问（LNA）的风险，而 WS 早就验证可用。
                     WsSendText(client, "{\"type\":\"pulling\"}");
-                    string pulled = PullMessages();
+                    string pulled = PullMessages("手动", false);
                     WsSendText(client, "{\"type\":\"pulled\",\"ok\":"
                                      + (pulled != null ? "true" : "false")
                                      + ",\"len\":" + (pulled == null ? 0 : pulled.Length)
@@ -1164,6 +1426,10 @@ internal static class Bridge
         Thread watcher = new Thread(ClipboardWatcher);
         watcher.IsBackground = true;
         watcher.Start();
+
+        Thread auto = new Thread(AutoPullLoop);
+        auto.IsBackground = true;
+        auto.Start();
 
         TcpListener listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
