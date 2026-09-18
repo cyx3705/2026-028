@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>极简 IM</title>
+<style>
+  :root{
+    --bg:#0f1116; --panel:#171a22; --panel2:#1c2029; --line:#262b36; --text:#e6e8ee;
+    --dim:#8b93a7; --accent:#4c8dff; --ok:#3ddc84; --bad:#ff5c5c; --warn:#ffb454;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--text); overflow:hidden;
+    font:14px/1.55 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:flex; flex-direction:column;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header{
+    padding:9px 14px; border-bottom:1px solid var(--line); background:var(--panel);
+    display:flex; align-items:center; gap:9px; flex:none; position:relative; z-index:20;
+  }
+  header h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.3px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--bad);flex:none;transition:background .25s}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.wait{background:var(--warn)}
+  #status{font-size:12px;color:var(--dim)}
+  .spacer{margin-left:auto}
+
+  /* ---------- 可点的状态药丸 ---------- */
+  .pill{
+    background:transparent; border:1px solid var(--line); color:var(--dim);
+    border-radius:20px; padding:3px 11px; font:inherit; font-size:11px; font-weight:400;
+    cursor:pointer; flex:none; white-space:nowrap; transition:.15s;
+  }
+  .pill:hover{background:#222634; color:var(--text)}
+  .pill.ok{color:var(--ok);border-color:#1e4a33}
+  .pill.bad{color:var(--bad);border-color:#4a2020}
+  .pill.warn{color:var(--warn);border-color:#4a3a1e}
+  .pill.busy{color:var(--accent);border-color:#26406e}
+
+  /* ---------- 弹出面板 ---------- */
+  .pop{
+    position:absolute; top:calc(100% + 6px); right:14px; width:370px; max-width:calc(100vw - 28px);
+    background:var(--panel2); border:1px solid var(--line); border-radius:11px;
+    box-shadow:0 12px 36px rgba(0,0,0,.5); padding:14px; display:none; z-index:30;
+  }
+  .pop.show{display:block}
+  .pop h3{margin:0 0 9px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px}
+  .pop p{margin:0 0 10px;color:var(--dim);font-size:12px;line-height:1.75}
+  .pop code{background:#0b0d12;border:1px solid var(--line);border-radius:4px;
+            padding:1px 5px;font:11px ui-monospace,Consolas,monospace;color:#b9cdf0}
+  .pop .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .pop .fine{font-size:11px;color:var(--dim);margin:10px 0 0;line-height:1.7}
+  .pop .finger{font:12px ui-monospace,Consolas,monospace;color:var(--ok);
+               background:#0b0d12;border:1px solid var(--line);border-radius:6px;
+               padding:7px 10px;display:block;margin:0 0 10px;word-break:break-all}
+  .pop .close{position:absolute;top:10px;right:12px;background:none;border:0;color:var(--dim);
+              cursor:pointer;font-size:16px;padding:0 4px;line-height:1}
+  .pop .close:hover{color:var(--text)}
+
+  /* ---------- 兜底弹层：不下载、不调文件选择器 ----------
+     沙箱文档里 showSaveFilePicker 必定 SecurityError，.bat 的普通下载
+     又可能被当危险类型挂起。文本框 + 剪贴板是浏览器原生行为，
+     不依赖任何权限 API，任何环境都成立。 */
+  .modal{position:fixed;inset:0;background:rgba(6,8,12,.84);display:none;z-index:60;
+         align-items:center;justify-content:center;padding:22px}
+  .modal.show{display:flex}
+  .modal .box{background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+              max-width:660px;width:100%;max-height:calc(100vh - 44px);overflow:auto;
+              padding:18px 20px;box-shadow:0 18px 60px rgba(0,0,0,.65)}
+  .modal h3{margin:0 0 10px;font-size:14px;font-weight:600}
+  .modal ol{margin:0 0 12px;padding-left:20px;color:var(--dim);font-size:12px;line-height:1.95}
+  .modal ol b{color:var(--text)}
+  .modal code{background:#0b0d12;border:1px solid var(--line);border-radius:4px;
+              padding:1px 5px;font:11px ui-monospace,Consolas,monospace;color:#b9cdf0}
+  .modal textarea{width:100%;height:160px;background:#0b0d12;color:var(--dim);
+                  border:1px solid var(--line);border-radius:8px;padding:10px;
+                  font:11px/1.5 ui-monospace,Consolas,monospace;resize:vertical;
+                  white-space:pre;overflow:auto}
+  .modal .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+
+  .st{display:flex;align-items:center;gap:7px;font-size:12px;margin-bottom:10px}
+  .st .b{width:7px;height:7px;border-radius:50%;background:var(--bad);flex:none}
+  .st .b.on{background:var(--ok)} .st .b.warn{background:var(--warn)}
+
+  /* ---------- 未装桥时的大横幅 ---------- */
+  #banner{
+    display:none; align-items:center; gap:12px; flex:none;
+    padding:11px 16px; background:#1b2333; border-bottom:1px solid #2b3a55;
+    font-size:13px;
+  }
+  #banner.show{display:flex}
+  #banner .txt{color:#b9cdf0}
+  #banner .txt b{color:#fff}
+
+  /* ---------- 消息区 ---------- */
+  #log{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:11px}
+  .row2{display:flex;flex-direction:column;max-width:78%}
+  .row2.out{align-self:flex-end;align-items:flex-end}
+  .bubble{
+    padding:8px 12px;border-radius:13px;background:var(--panel2);
+    border:1px solid var(--line);white-space:pre-wrap;word-break:break-word;
+  }
+  .row2.out .bubble{background:#1d3a6b;border-color:#2a4d8a}
+  .row2.raw .bubble{background:#1b1c22;color:var(--dim);font:11px ui-monospace,Consolas,monospace;
+                    border-style:dashed}
+  .meta{font-size:11px;color:var(--dim);margin:2px 5px;display:flex;gap:7px;align-items:center}
+  .lock{font-size:10px;color:var(--ok)}
+  .sys{align-self:center;font-size:12px;color:var(--dim);background:#0b0d12;
+       border:1px solid var(--line);border-radius:20px;padding:4px 13px;max-width:80%;text-align:center}
+  .sys.bad{color:var(--bad);border-color:#4a2020}
+  .sys.ok{color:var(--ok);border-color:#1e4a33}
+  .empty{margin:auto;color:var(--dim);font-size:13px;text-align:center;line-height:2.1}
+  .empty b{color:var(--warn);font-weight:600}
+
+  /* ---------- 输入区 ---------- */
+  footer{
+    border-top:1px solid var(--line);background:var(--panel);padding:10px 14px;
+    display:flex;gap:8px;align-items:flex-end;flex:none;
+  }
+  textarea{
+    flex:1;resize:none;height:42px;max-height:140px;background:#0b0d12;color:var(--text);
+    border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;outline:none;
+  }
+  textarea:focus{border-color:var(--accent)}
+  textarea:disabled{opacity:.45}
+
+  button.act{
+    background:var(--accent);color:#fff;border:0;border-radius:7px;
+    padding:8px 15px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;flex:none;
+  }
+  button.act:hover:not(:disabled){filter:brightness(1.12)}
+  button.act:disabled{opacity:.45;cursor:not-allowed}
+  button.act.ghost{background:transparent;border:1px solid var(--line);color:var(--text);font-weight:400}
+
+  /* ---------- 测试弹窗里的复选框 ---------- */
+  .chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);
+       margin:11px 0 0;cursor:pointer;user-select:none}
+  .chk input{accent-color:var(--accent);width:14px;height:14px;margin:0;cursor:pointer}
+
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2a2f3c;border-radius:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+
+<header>
+  <span id="dot" class="dot wait"></span>
+  <h1>极简 IM</h1>
+  <span id="status">初始化…</span>
+  <span class="spacer"></span>
+  <button class="pill bad" id="pillBridge">桥 未连接</button>
+  <button class="pill warn" id="pillKey">密钥 未就绪</button>
+  <button class="pill" id="pillTest">🧪 测试</button>
+
+  <!--
+    弹出面板必须放在 <header> 里面！
+    .pop 用的是 top: calc(100% + 6px)；如果它是 header 的兄弟，
+    最近的非 static 祖先就是初始包含块，100% 会解析成【整个视口高度】，
+    弹窗被扔到屏幕外面去 —— 点了完全没反应。踩过。
+  -->
+  <!-- 桥：点一下展开 -->
+  <div class="pop" id="popBridge">
+  <button class="close" data-close="popBridge">×</button>
+  <h3>🌉 桥</h3>
+  <div class="st"><span class="b" id="bridgeDot"></span><span id="bridgeText">检查中…</span></div>
+  <p>
+    桥是一个 <strong>20 KB 的小程序</strong>，用 Windows 自带的 C# 编译器现场编译。
+    <strong>不需要 Python / Node / .NET SDK，也不用联网下载任何东西。</strong>
+    它负责把密文写进剪贴板、切到微信、按 <code>Ctrl+V</code> <code>Enter</code>，
+    同时监听剪贴板，你在微信里 <code>Ctrl+C</code> 就能自动收。
+  </p>
+  <div class="row">
+    <button class="act" id="btnDownload">⬇ 下载安装桥</button>
+    <button class="act ghost" id="btnShowSrc">另存 bridge.cs</button>
+    <button class="act ghost" id="btnCopyInstall">📋 手动保存（万能）</button>
+    <button class="act ghost" id="btnTestSend">📤 发送测试消息</button>
+  </div>
+  <p class="fine">
+    存成 <code>install-bridge.bat</code>，<strong>双击运行</strong>即可，它会自己编译并启动。<br>
+    首次运行 Windows 可能提示"已保护你的电脑"，点
+    <strong>更多信息 → 仍要运行</strong>（脚本文件的正常提示）。<br>
+    <span style="color:var(--dim)">「下载」走的是浏览器下载管道，而 <code>.bat</code> 属于危险文件类型，
+    可能被拦下挂起。拦住了就点 <strong>📋 手动保存</strong> ——
+    那条路不用下载、不调文件选择器，任何环境都成立。</span>
+  </p>
+  <p class="fine js-build" style="opacity:.65"></p>
+</div>
+
+<!-- 密钥：点一下展开 -->
+<div class="pop" id="popKey">
+  <button class="close" data-close="popKey">×</button>
+  <h3>🔑 会话密钥</h3>
+  <div class="st"><span class="b" id="keyDot"></span><span id="keyText">未就绪</span></div>
+  <p id="keyHint">
+    点顶栏的「密钥」就是<strong>把公钥发出去</strong>。双方各点一次，就能各自算出同一个会话密钥。
+    <strong>私钥永远不出本机。</strong>
+  </p>
+  <span class="finger" id="keyFinger" style="display:none"></span>
+  <div class="row">
+    <button class="act ghost" id="btnCopyKey">复制我的公钥</button>
+    <button class="act ghost" id="btnReset">重置密钥</button>
+    <button class="act ghost" id="btnTestSend2">📤 发送测试消息</button>
+  </div>
+  <p class="fine">
+    公钥以 <code>E2E1-K.…</code> 开头，会作为一条普通微信消息发出去 —— 别人看起来就是一串乱码。
+  </p>
+  <p class="fine js-build" style="opacity:.65"></p>
+  </div>
+
+<!-- 测试：假装第二端 -->
+<div class="pop" id="popTest">
+  <button class="close" data-close="popTest">×</button>
+  <h3>🧪 测试（假装第二端）</h3>
+  <div class="st"><span class="b" id="testDot"></span><span id="testText">未启用</span></div>
+  <p>
+    点「测试连接」会<strong>现场生成第二把 ECDH 密钥</strong>当假对方，走真实的
+    <code>setPeerPub</code> 协商。之后你发一条消息，页面会
+    <strong>用它真的解一遍你的出站密文</strong>，再以对方的身份加密一条回复回来 ——
+    一问一答，两个方向都跑到，不用等第二个人。
+  </p>
+  <p style="color:var(--dim);font-size:11px;line-height:1.7;margin-top:-4px">
+    密钥按公钥字典序切成两半，所以<strong>对方的发送键 = 我的接收键</strong>。
+    两把钥匙本来就在这台机器上，回路用的是真 AES-GCM 和真计数器，不是模拟。
+  </p>
+  <div class="row">
+    <button class="act" id="btnTestConnect">🔌 测试连接</button>
+    <button class="act ghost" id="btnTestExit">退出测试</button>
+  </div>
+  <label class="chk"><input type="checkbox" id="chkTestToWechat" checked> 两条密文都真发到微信</label>
+  <p class="fine">
+    勾上就走<strong>真桥</strong>发到<strong>微信当前打开的那个对话</strong>
+    （你现在停在哪个聊天，就发到哪个）—— 微信里会看到一问一答两条密文，
+    页面上看到对应的两条明文。发之前确认一下微信停在对的对话上。<br>
+    <span style="color:var(--warn)">测试连接会顶掉当前会话密钥</span> ——
+    要是已经跟真人交换过公钥，之后得重新交换。
+  </p>
+  <p class="fine js-build" style="opacity:.65"></p>
+</div>
+</header>
+
+<!-- 没装桥时的大横幅：不依赖弹窗，永远在视口里，一眼就能看到 -->
+<div id="banner">
+  <span class="txt">还没装桥 —— 装好后页面会自动连上</span>
+  <button class="act" id="btnInstallBig">⬇ 下载安装桥</button>
+  <button class="act ghost" id="btnPasteBig">📋 手动保存</button>
+  <span class="txt" style="opacity:.7;font-size:11px">（也可以点右上角的「桥」看详细说明）</span>
+</div>
+
+<!-- 兜底：不下载、不调文件选择器，纯文本框 + 剪贴板 -->
+<div class="modal" id="pasteModal">
+  <div class="box">
+    <h3>📋 手动保存安装脚本 —— 任何环境都能用</h3>
+    <ol>
+      <li>脚本已经生成在下面的文本框里，<b>点一下文本框会自动全选</b>（或按 <code>Ctrl+A</code>）</li>
+      <li>按 <code>Ctrl+C</code> 复制</li>
+      <li>打开<b>记事本</b>，按 <code>Ctrl+V</code> 粘贴</li>
+      <li>文件 → 另存为：文件名填 <code>"install-bridge.bat"</code> ——
+          <b>要带引号</b>，这样记事本才不会偷偷加 <code>.txt</code>；
+          保存类型选<b>「所有文件」</b>，编码选 <b>ANSI</b></li>
+      <li>双击运行 <code>install-bridge.bat</code></li>
+    </ol>
+    <textarea id="pasteArea" readonly spellcheck="false"></textarea>
+    <div class="row">
+      <button class="act" id="btnCopyPaste">复制到剪贴板</button>
+      <button class="act ghost" id="btnClosePaste">关闭</button>
+      <span class="txt" id="pasteMsg" style="font-size:11px;color:var(--dim)"></span>
+    </div>
+  </div>
+</div>
+
+<div id="log">
+  <div class="empty" id="emptyState">
+    微信在这里只是一条<strong>不可信管道</strong><br>
+    点右上角<span style="color:var(--accent)">「桥」</span>装桥，点<span style="color:var(--accent)">「密钥」</span>交换公钥
+  </div>
+</div>
+
+<footer>
+  <textarea id="input" placeholder="先点右上角「桥」和「密钥」" disabled></textarea>
+  <button class="act" id="send" disabled>发送</button>
+</footer>
+
+<script>
+"use strict";
+
+/* =====================================================================
+ * 桥的 C# 源码，base64 内嵌。用 base64 而不是原文，是为了绕开转义问题。
+ * ===================================================================== */
+var BRIDGE_B64 = "Ly8gYnJpZGdlLmNzIC0tIFdlQ2hhdCBjbGlwYm9hcmQgYnJpZGdlLgovLwovLyBUYXJnZXRzIHRoZSBDIyBjb21waWxlciB0aGF0IHNoaXBzIHdpdGggZXZlcnkgV2luZG93czoKLy8gICAgIEM6XFdpbmRvd3NcTWljcm9zb2Z0Lk5FVFxGcmFtZXdvcms2NFx2NC4wLjMwMzE5XGNzYy5leGUgICAoQyMgNSBvbmx5ISkKLy8gc28gdGhlIHVzZXIgbmVlZHMgdG8gaW5zdGFsbCBOT1RISU5HLiBObyBTREssIG5vIE51R2V0LCBubyBydW50aW1lIHBhY2suCi8vCi8vIFdoYXQgaXQgZG9lczoKLy8gICAqIHNlcnZlcyBpbS5odG1sIGFuZCBhIFdlYlNvY2tldCBvbiAxMjcuMC4wLjEKLy8gICAqIFNFTkQ6IHBhZ2UgLT4gYnJpZGdlIC0+IGNsaXBib2FyZCAtPiBmb2N1cyBXZUNoYXQgLT4gQ3RybCtWIC0+IEVudGVyCi8vICAgKiBSRUNWOiB5b3UgQ3RybCtDIGluIFdlQ2hhdCAtPiBicmlkZ2Ugbm90aWNlcyBjbGlwYm9hcmQgY2hhbmdlIC0+IHBhZ2UKLy8KLy8gSXQgbmV2ZXIgdG91Y2hlcyB0aGUgV2VDaGF0IHByb3RvY29sLCBzbyBpdCBpcyB2ZXJzaW9uIGluZGVwZW5kZW50LgovLwovLyBDIyA1IGNvbnN0cmFpbnRzIChubyBzdHJpbmcgaW50ZXJwb2xhdGlvbiwgbm8gPy4sIG5vIG91dCB2YXIsCi8vIG5vIGV4cHJlc3Npb24tYm9kaWVkIG1lbWJlcnMsIG5vIGF1dG8tcHJvcGVydHkgaW5pdGlhbGl6ZXJzKS4KCnVzaW5nIFN5c3RlbTsKdXNpbmcgU3lzdGVtLkNvbGxlY3Rpb25zLkdlbmVyaWM7CnVzaW5nIFN5c3RlbS5EaWFnbm9zdGljczsKdXNpbmcgU3lzdGVtLkRyYXdpbmc7CnVzaW5nIFN5c3RlbS5EcmF3aW5nLkltYWdpbmc7CnVzaW5nIFN5c3RlbS5HbG9iYWxpemF0aW9uOwp1c2luZyBTeXN0ZW0uSU87CnVzaW5nIFN5c3RlbS5OZXQ7CnVzaW5nIFN5c3RlbS5OZXQuU29ja2V0czsKdXNpbmcgU3lzdGVtLlJ1bnRpbWUuSW50ZXJvcFNlcnZpY2VzOwp1c2luZyBTeXN0ZW0uU2VjdXJpdHkuQ3J5cHRvZ3JhcGh5Owp1c2luZyBTeXN0ZW0uVGV4dDsKdXNpbmcgU3lzdGVtLlRocmVhZGluZzsKdXNpbmcgU3lzdGVtLldlYi5TY3JpcHQuU2VyaWFsaXphdGlvbjsKCmludGVybmFsIHN0YXRpYyBjbGFzcyBCcmlkZ2UKewogICAgcHJpdmF0ZSBjb25zdCBzdHJpbmcgSG9zdCA9ICIxMjcuMC4wLjEiOwogICAgcHJpdmF0ZSBjb25zdCBpbnQgUG9ydCA9IDg3NjU7CiAgICBwcml2YXRlIGNvbnN0IHN0cmluZyBXc01hZ2ljID0gIjI1OEVBRkE1LUU5MTQtNDdEQS05NUNBLUM1QUIwREM4NUIxMSI7CgogICAgLy8gV2ViU29ja2V0IG9wY29kZXMKICAgIHByaXZhdGUgY29uc3QgaW50IE9wQ29udCA9IDB4MCwgT3BUZXh0ID0gMHgxLCBPcEJpbiA9IDB4MjsKICAgIHByaXZhdGUgY29uc3QgaW50IE9wQ2xvc2UgPSAweDgsIE9wUGluZyA9IDB4OSwgT3BQb25nID0gMHhBOwoKICAgIC8vIFdpbjMyCiAgICBwcml2YXRlIGNvbnN0IGludCBDZlVuaWNvZGVUZXh0ID0gMTM7CiAgICBwcml2YXRlIGNvbnN0IHVpbnQgR21lbU1vdmVhYmxlID0gMHgwMDQyOwogICAgcHJpdmF0ZSBjb25zdCBpbnQgU3dSZXN0b3JlID0gOTsKICAgIHByaXZhdGUgY29uc3QgdXNob3J0IFZrQ29udHJvbCA9IDB4MTEsIFZrViA9IDB4NTYsIFZrUmV0dXJuID0gMHgwRDsKICAgIHByaXZhdGUgY29uc3QgdWludCBLZXlldmVudGZLZXl1cCA9IDB4MDAwMjsKCiAgICBwcml2YXRlIHN0YXRpYyByZWFkb25seSBvYmplY3QgQ2xpZW50c0xvY2sgPSBuZXcgb2JqZWN0KCk7CiAgICBwcml2YXRlIHN0YXRpYyByZWFkb25seSBMaXN0PFRjcENsaWVudD4gQ2xpZW50cyA9IG5ldyBMaXN0PFRjcENsaWVudD4oKTsKCiAgICBwcml2YXRlIHN0YXRpYyBzdHJpbmcgX3BhZ2VQYXRoOwogICAgcHJpdmF0ZSBzdGF0aWMgc3RyaW5nIF9sYXN0U2VudFRleHQgPSAiIjsKICAgIHByaXZhdGUgc3RhdGljIEludFB0ciBfd2VjaGF0SHduZCA9IEludFB0ci5aZXJvOwogICAgcHJpdmF0ZSBzdGF0aWMgaW50IF93ZWNoYXRQaWQgPSAwOwoKICAgIC8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQogICAgLy8gV2luMzIgaW50ZXJvcAogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCgogICAgW1N0cnVjdExheW91dChMYXlvdXRLaW5kLlNlcXVlbnRpYWwpXQogICAgcHJpdmF0ZSBzdHJ1Y3QgUkVDVCB7IHB1YmxpYyBpbnQgTGVmdCwgVG9wLCBSaWdodCwgQm90dG9tOyB9CgogICAgW1N0cnVjdExheW91dChMYXlvdXRLaW5kLlNlcXVlbnRpYWwpXQogICAgcHJpdmF0ZSBzdHJ1Y3QgS0VZQkRJTlBVVAogICAgewogICAgICAgIHB1YmxpYyB1c2hvcnQgd1ZrOwogICAgICAgIHB1YmxpYyB1c2hvcnQgd1NjYW47CiAgICAgICAgcHVibGljIHVpbnQgZHdGbGFnczsKICAgICAgICBwdWJsaWMgdWludCB0aW1lOwogICAgICAgIHB1YmxpYyBJbnRQdHIgZHdFeHRyYUluZm87CiAgICB9CgogICAgW1N0cnVjdExheW91dChMYXlvdXRLaW5kLlNlcXVlbnRpYWwpXQogICAgcHJpdmF0ZSBzdHJ1Y3QgTU9VU0VJTlBVVAogICAgewogICAgICAgIHB1YmxpYyBpbnQgZHgsIGR5OwogICAgICAgIHB1YmxpYyB1aW50IG1vdXNlRGF0YSwgZHdGbGFncywgdGltZTsKICAgICAgICBwdWJsaWMgSW50UHRyIGR3RXh0cmFJbmZvOwogICAgfQoKICAgIFtTdHJ1Y3RMYXlvdXQoTGF5b3V0S2luZC5FeHBsaWNpdCldCiAgICBwcml2YXRlIHN0cnVjdCBJbnB1dFVuaW9uCiAgICB7CiAgICAgICAgW0ZpZWxkT2Zmc2V0KDApXSBwdWJsaWMgTU9VU0VJTlBVVCBtaTsKICAgICAgICBbRmllbGRPZmZzZXQoMCldIHB1YmxpYyBLRVlCRElOUFVUIGtpOwogICAgfQoKICAgIFtTdHJ1Y3RMYXlvdXQoTGF5b3V0S2luZC5TZXF1ZW50aWFsKV0KICAgIHByaXZhdGUgc3RydWN0IElOUFVUCiAgICB7CiAgICAgICAgcHVibGljIHVpbnQgdHlwZTsKICAgICAgICBwdWJsaWMgSW5wdXRVbmlvbiBVOwogICAgfQoKICAgIHByaXZhdGUgY29uc3QgdWludCBJbnB1dEtleWJvYXJkID0gMTsKCiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIildIHByaXZhdGUgc3RhdGljIGV4dGVybiBJbnRQdHIgR2V0Rm9yZWdyb3VuZFdpbmRvdygpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBTZXRGb3JlZ3JvdW5kV2luZG93KEludFB0ciBoV25kKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgU2hvd1dpbmRvdyhJbnRQdHIgaFduZCwgaW50IG5DbWRTaG93KTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgSXNJY29uaWMoSW50UHRyIGhXbmQpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBJc1dpbmRvdyhJbnRQdHIgaFduZCk7CiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIiwgQ2hhclNldCA9IENoYXJTZXQuVW5pY29kZSldCiAgICBwcml2YXRlIHN0YXRpYyBleHRlcm4gaW50IEdldENsYXNzTmFtZShJbnRQdHIgaFduZCwgU3RyaW5nQnVpbGRlciBscENsYXNzTmFtZSwgaW50IG5NYXhDb3VudCk7CiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIildCiAgICBwcml2YXRlIHN0YXRpYyBleHRlcm4gdWludCBHZXRXaW5kb3dUaHJlYWRQcm9jZXNzSWQoSW50UHRyIGhXbmQsIG91dCB1aW50IGxwZHdQcm9jZXNzSWQpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBBdHRhY2hUaHJlYWRJbnB1dCh1aW50IGlkQXR0YWNoLCB1aW50IGlkQXR0YWNoVG8sIGJvb2wgZkF0dGFjaCk7CiAgICBbRGxsSW1wb3J0KCJ1c2VyMzIuZGxsIildIHByaXZhdGUgc3RhdGljIGV4dGVybiBJbnRQdHIgU2V0Rm9jdXMoSW50UHRyIGhXbmQpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBCcmluZ1dpbmRvd1RvVG9wKEludFB0ciBoV25kKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIHVpbnQgR2V0Q2xpcGJvYXJkU2VxdWVuY2VOdW1iZXIoKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgT3BlbkNsaXBib2FyZChJbnRQdHIgaFduZE5ld093bmVyKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQ2xvc2VDbGlwYm9hcmQoKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgRW1wdHlDbGlwYm9hcmQoKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIEludFB0ciBTZXRDbGlwYm9hcmREYXRhKHVpbnQgdUZvcm1hdCwgSW50UHRyIGhNZW0pOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gSW50UHRyIEdldENsaXBib2FyZERhdGEodWludCB1Rm9ybWF0KTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgSXNDbGlwYm9hcmRGb3JtYXRBdmFpbGFibGUodWludCBmb3JtYXQpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gdWludCBTZW5kSW5wdXQodWludCBuSW5wdXRzLCBJTlBVVFtdIHBJbnB1dHMsIGludCBjYlNpemUpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBHZXRXaW5kb3dSZWN0KEludFB0ciBoV25kLCBvdXQgUkVDVCBscFJlY3QpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gaW50IEdldFdpbmRvd0xvbmcoSW50UHRyIGhXbmQsIGludCBuSW5kZXgpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBQcmludFdpbmRvdyhJbnRQdHIgaHduZCwgSW50UHRyIGhkY0JsdCwgdWludCBuRmxhZ3MpOwogICAgW0RsbEltcG9ydCgidXNlcjMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gSW50UHRyIEdldFdpbmRvd0RDKEludFB0ciBoV25kKTsKICAgIFtEbGxJbXBvcnQoInVzZXIzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGludCBSZWxlYXNlREMoSW50UHRyIGhXbmQsIEludFB0ciBoREMpOwogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIildIHByaXZhdGUgc3RhdGljIGV4dGVybiB1aW50IEdldEN1cnJlbnRUaHJlYWRJZCgpOwogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIildIHByaXZhdGUgc3RhdGljIGV4dGVybiBJbnRQdHIgR2xvYmFsQWxsb2ModWludCB1RmxhZ3MsIFVJbnRQdHIgZHdCeXRlcyk7CiAgICBbRGxsSW1wb3J0KCJrZXJuZWwzMi5kbGwiKV0gcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIEludFB0ciBHbG9iYWxMb2NrKEludFB0ciBoTWVtKTsKICAgIFtEbGxJbXBvcnQoImtlcm5lbDMyLmRsbCIpXSBwcml2YXRlIHN0YXRpYyBleHRlcm4gYm9vbCBHbG9iYWxVbmxvY2soSW50UHRyIGhNZW0pOwogICAgW0RsbEltcG9ydCgia2VybmVsMzIuZGxsIildIHByaXZhdGUgc3RhdGljIGV4dGVybiBJbnRQdHIgR2xvYmFsRnJlZShJbnRQdHIgaE1lbSk7CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBMb2dnaW5nCiAgICAvLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCiAgICBwcml2YXRlIHN0YXRpYyB2b2lkIExvZyhzdHJpbmcgbXNnKQogICAgewogICAgICAgIENvbnNvbGUuV3JpdGVMaW5lKCJbIiArIERhdGVUaW1lLk5vdy5Ub1N0cmluZygiSEg6bW06c3MiLCBDdWx0dXJlSW5mby5JbnZhcmlhbnRDdWx0dXJlKSArICJdICIgKyBtc2cpOwogICAgfQoKICAgIC8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQogICAgLy8gQ2xpcGJvYXJkCiAgICAvLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCiAgICBwcml2YXRlIHN0YXRpYyBzdHJpbmcgR2V0Q2xpcGJvYXJkVGV4dCgpCiAgICB7CiAgICAgICAgZm9yIChpbnQgYXR0ZW1wdCA9IDA7IGF0dGVtcHQgPCA1OyBhdHRlbXB0KyspCiAgICAgICAgewogICAgICAgICAgICB0cnkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgaWYgKCFJc0NsaXBib2FyZEZvcm1hdEF2YWlsYWJsZShDZlVuaWNvZGVUZXh0KSkgcmV0dXJuIG51bGw7CiAgICAgICAgICAgICAgICBpZiAoIU9wZW5DbGlwYm9hcmQoSW50UHRyLlplcm8pKSB7IFRocmVhZC5TbGVlcCgzMCk7IGNvbnRpbnVlOyB9CiAgICAgICAgICAgICAgICB0cnkKICAgICAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICAgICBpZiAoIUlzQ2xpcGJvYXJkRm9ybWF0QXZhaWxhYmxlKENmVW5pY29kZVRleHQpKSByZXR1cm4gbnVsbDsKICAgICAgICAgICAgICAgICAgICBJbnRQdHIgaCA9IEdldENsaXBib2FyZERhdGEoQ2ZVbmljb2RlVGV4dCk7CiAgICAgICAgICAgICAgICAgICAgaWYgKGggPT0gSW50UHRyLlplcm8pIHJldHVybiBudWxsOwogICAgICAgICAgICAgICAgICAgIEludFB0ciBwID0gR2xvYmFsTG9jayhoKTsKICAgICAgICAgICAgICAgICAgICBpZiAocCA9PSBJbnRQdHIuWmVybykgcmV0dXJuIG51bGw7CiAgICAgICAgICAgICAgICAgICAgdHJ5IHsgcmV0dXJuIE1hcnNoYWwuUHRyVG9TdHJpbmdVbmkocCk7IH0KICAgICAgICAgICAgICAgICAgICBmaW5hbGx5IHsgR2xvYmFsVW5sb2NrKGgpOyB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBmaW5hbGx5IHsgQ2xvc2VDbGlwYm9hcmQoKTsgfQogICAgICAgICAgICB9CiAgICAgICAgICAgIGNhdGNoIHsgVGhyZWFkLlNsZWVwKDMwKTsgfQogICAgICAgIH0KICAgICAgICByZXR1cm4gbnVsbDsKICAgIH0KCiAgICBwcml2YXRlIHN0YXRpYyBib29sIFNldENsaXBib2FyZFRleHQoc3RyaW5nIHRleHQpCiAgICB7CiAgICAgICAgZm9yIChpbnQgYXR0ZW1wdCA9IDA7IGF0dGVtcHQgPCA1OyBhdHRlbXB0KyspCiAgICAgICAgewogICAgICAgICAgICB0cnkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgaWYgKCFPcGVuQ2xpcGJvYXJkKEludFB0ci5aZXJvKSkgeyBUaHJlYWQuU2xlZXAoMzApOyBjb250aW51ZTsgfQogICAgICAgICAgICAgICAgdHJ5CiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgICAgaWYgKCFFbXB0eUNsaXBib2FyZCgpKSByZXR1cm4gZmFsc2U7CgogICAgICAgICAgICAgICAgICAgIGJ5dGVbXSBieXRlcyA9IEVuY29kaW5nLlVuaWNvZGUuR2V0Qnl0ZXModGV4dCArICJcMCIpOwogICAgICAgICAgICAgICAgICAgIEludFB0ciBoTWVtID0gR2xvYmFsQWxsb2MoR21lbU1vdmVhYmxlLCBuZXcgVUludFB0cigodWludClieXRlcy5MZW5ndGgpKTsKICAgICAgICAgICAgICAgICAgICBpZiAoaE1lbSA9PSBJbnRQdHIuWmVybykgcmV0dXJuIGZhbHNlOwoKICAgICAgICAgICAgICAgICAgICBJbnRQdHIgdGFyZ2V0ID0gR2xvYmFsTG9jayhoTWVtKTsKICAgICAgICAgICAgICAgICAgICBpZiAodGFyZ2V0ID09IEludFB0ci5aZXJvKSB7IEdsb2JhbEZyZWUoaE1lbSk7IHJldHVybiBmYWxzZTsgfQogICAgICAgICAgICAgICAgICAgIE1hcnNoYWwuQ29weShieXRlcywgMCwgdGFyZ2V0LCBieXRlcy5MZW5ndGgpOwogICAgICAgICAgICAgICAgICAgIEdsb2JhbFVubG9jayhoTWVtKTsKCiAgICAgICAgICAgICAgICAgICAgLy8gQWZ0ZXIgU2V0Q2xpcGJvYXJkRGF0YSBzdWNjZWVkcyB0aGUgT1Mgb3ducyBoTWVtLgogICAgICAgICAgICAgICAgICAgIGlmIChTZXRDbGlwYm9hcmREYXRhKENmVW5pY29kZVRleHQsIGhNZW0pID09IEludFB0ci5aZXJvKQogICAgICAgICAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICAgICAgICAgR2xvYmFsRnJlZShoTWVtKTsKICAgICAgICAgICAgICAgICAgICAgICAgcmV0dXJuIGZhbHNlOwogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICByZXR1cm4gdHJ1ZTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIGZpbmFsbHkgeyBDbG9zZUNsaXBib2FyZCgpOyB9CiAgICAgICAgICAgIH0KICAgICAgICAgICAgY2F0Y2ggeyBUaHJlYWQuU2xlZXAoMzApOyB9CiAgICAgICAgfQogICAgICAgIHJldHVybiBmYWxzZTsKICAgIH0KCiAgICAvLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KICAgIC8vIFdlQ2hhdCB3aW5kb3cKICAgIC8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQoKICAgIHByaXZhdGUgc3RhdGljIHZvaWQgRmluZFdlQ2hhdCgpCiAgICB7CiAgICAgICAgUHJvY2Vzc1tdIHByb2NzID0gUHJvY2Vzcy5HZXRQcm9jZXNzZXNCeU5hbWUoIldlaXhpbiIpOwogICAgICAgIGlmIChwcm9jcy5MZW5ndGggPT0gMCkgcHJvY3MgPSBQcm9jZXNzLkdldFByb2Nlc3Nlc0J5TmFtZSgiV2VDaGF0Iik7CgogICAgICAgIGZvcmVhY2ggKFByb2Nlc3MgcCBpbiBwcm9jcykKICAgICAgICB7CiAgICAgICAgICAgIEludFB0ciBoID0gcC5NYWluV2luZG93SGFuZGxlOwogICAgICAgICAgICBpZiAoaCAhPSBJbnRQdHIuWmVybykKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgX3dlY2hhdEh3bmQgPSBoOwogICAgICAgICAgICAgICAgX3dlY2hhdFBpZCA9IHAuSWQ7CiAgICAgICAgICAgICAgICBTdHJpbmdCdWlsZGVyIHNiID0gbmV3IFN0cmluZ0J1aWxkZXIoMjU2KTsKICAgICAgICAgICAgICAgIEdldENsYXNzTmFtZShoLCBzYiwgMjU2KTsKICAgICAgICAgICAgICAgIExvZygiZm91bmQgV2VDaGF0OiBwaWQ9IiArIHAuSWQgKyAiIGNsYXNzPSIgKyBzYi5Ub1N0cmluZygpKTsKICAgICAgICAgICAgICAgIHJldHVybjsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICBfd2VjaGF0SHduZCA9IEludFB0ci5aZXJvOwogICAgICAgIF93ZWNoYXRQaWQgPSAwOwogICAgfQoKICAgIHByaXZhdGUgc3RhdGljIHZvaWQgRW5zdXJlV2VDaGF0KCkKICAgIHsKICAgICAgICBpZiAoX3dlY2hhdEh3bmQgIT0gSW50UHRyLlplcm8gJiYgSXNXaW5kb3coX3dlY2hhdEh3bmQpKSByZXR1cm47CiAgICAgICAgRmluZFdlQ2hhdCgpOwogICAgfQoKICAgIC8vLyA8c3VtbWFyeT5DbGFzcyBuYW1lIG9mIGEgd2luZG93LCBvciAiIiBvbiBmYWlsdXJlLjwvc3VtbWFyeT4KICAgIHByaXZhdGUgc3RhdGljIHN0cmluZyBDbGFzc09mKEludFB0ciBod25kKQogICAgewogICAgICAgIFN0cmluZ0J1aWxkZXIgc2IgPSBuZXcgU3RyaW5nQnVpbGRlcigyNTYpOwogICAgICAgIEdldENsYXNzTmFtZShod25kLCBzYiwgMjU2KTsKICAgICAgICByZXR1cm4gc2IuVG9TdHJpbmcoKTsKICAgIH0KCiAgICBwcml2YXRlIHN0YXRpYyBpbnQgUGlkT2YoSW50UHRyIGh3bmQpCiAgICB7CiAgICAgICAgdWludCBwaWQ7CiAgICAgICAgR2V0V2luZG93VGhyZWFkUHJvY2Vzc0lkKGh3bmQsIG91dCBwaWQpOwogICAgICAgIHJldHVybiAoaW50KXBpZDsKICAgIH0KCiAgICAvLy8gPHN1bW1hcnk+CiAgICAvLy8gVEhFIFNBRkVUWSBHVUFSRC4KICAgIC8vLyBSZXR1cm5zIHRydWUgb25seSB3aGVuIHRoZSBjdXJyZW50IGZvcmVncm91bmQgd2luZG93IHJlYWxseSBiZWxvbmdzIHRvCiAgICAvLy8gdGhlIFdlQ2hhdCBwcm9jZXNzLiBLZXlzdHJva2VzIGFyZSBzZW50IG9ubHkgd2hlbiB0aGlzIHBhc3Nlcywgc28gYQogICAgLy8vIGZhaWxlZCBhY3RpdmF0aW9uIGFib3J0cyBpbnN0ZWFkIG9mIHBhc3RpbmcgaW50byBzb21lIHJhbmRvbSB3aW5kb3cuCiAgICAvLy8gPC9zdW1tYXJ5PgogICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBXZUNoYXRJc0ZvcmVncm91bmQoKQogICAgewogICAgICAgIEludFB0ciBmZyA9IEdldEZvcmVncm91bmRXaW5kb3coKTsKICAgICAgICBpZiAoZmcgPT0gSW50UHRyLlplcm8pIHJldHVybiBmYWxzZTsKCiAgICAgICAgaW50IGZnUGlkID0gUGlkT2YoZmcpOwogICAgICAgIGlmIChfd2VjaGF0UGlkICE9IDAgJiYgZmdQaWQgIT0gX3dlY2hhdFBpZCkgcmV0dXJuIGZhbHNlOwoKICAgICAgICAvLyBJZiB3ZSBoYXZlIG5vdCBwaW5uZWQgYSB3aW5kb3cgeWV0LCBhY2NlcHQgYW55IFdlQ2hhdC1wcm9jZXNzIHdpbmRvdwogICAgICAgIC8vIHdob3NlIGNsYXNzIGxvb2tzIGxpa2UgdGhlIFF0IG1haW4gd2luZG93LgogICAgICAgIGlmIChfd2VjaGF0UGlkID09IDApCiAgICAgICAgewogICAgICAgICAgICB0cnkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgUHJvY2VzcyBwID0gUHJvY2Vzcy5HZXRQcm9jZXNzQnlJZChmZ1BpZCk7CiAgICAgICAgICAgICAgICBpZiAoIShwLlByb2Nlc3NOYW1lID09ICJXZWl4aW4iIHx8IHAuUHJvY2Vzc05hbWUgPT0gIldlQ2hhdCIpKSByZXR1cm4gZmFsc2U7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgY2F0Y2ggeyByZXR1cm4gZmFsc2U7IH0KICAgICAgICB9CgogICAgICAgIHN0cmluZyBjbHMgPSBDbGFzc09mKGZnKTsKICAgICAgICByZXR1cm4gY2xzLkluZGV4T2YoIlF0IiwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsSWdub3JlQ2FzZSkgPj0gMDsKICAgIH0KCiAgICBwcml2YXRlIGNvbnN0IGludCBHd2xTdHlsZSA9IC0xNjsKICAgIHByaXZhdGUgY29uc3QgaW50IFdzVGhpY2tmcmFtZSA9IDB4MDAwNDAwMDA7CgogICAgLy8vIDxzdW1tYXJ5PgogICAgLy8vIOWIpOaWreW+ruS/oeaYr+S4jeaYr+WBnOWcqCLlt7LnmbvlvZXkuLvnlYzpnaIi77yM6ICM5LiN5pivIueZu+W9leS6jOe7tOeggeeVjOmdoiLjgIIKICAgIC8vLwogICAgLy8vIOS4uuS7gOS5iOmcgOimgei/meS4qu+8mui4qei/h+S4gOasoSDigJTigJQg5b6u5L+h6KKr6aG25LiL57q/5ZCO5by5552A55m75b2V5LqM57u056CB77yMCiAgICAvLy8g5qGl55qE5YmN5Y+w5qCh6aqM54Wn5qC36YCa6L+H77yI5ZCM5LiA5LiqIHBpZOOAgeWQjOS4gOS4qiBRdCDnqpflj6PnsbvvvInvvIwKICAgIC8vLyDnu5Pmnpzlr4bmlofooqvnspjov5vkuobkuoznu7TnoIHnqpflj6PvvIzogIzmoaXov5jmiqXlkYogb2vjgIIKICAgIC8vLwogICAgLy8vIOS4pOS4quS/oeWPt++8iOWunua1i+aVsOaNru+8ie+8mgogICAgLy8vICAg55m75b2V55WM6Z2iICAgMjk1eDM4N++8jOWbuuWumuWwuuWvuOS4jeWPr+e8qeaUvgogICAgLy8vICAg5Li755WM6Z2iICAxMDE3eDY5MCAvIDE3MjF4MTA0Me+8jOWPr+e8qeaUvu+8iOaciSBXU19USElDS0ZSQU1F77yJCiAgICAvLy8gPC9zdW1tYXJ5PgogICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBXZUNoYXRMb29rc0xvZ2dlZEluKEludFB0ciBod25kKQogICAgewogICAgICAgIFJFQ1QgcjsKICAgICAgICBpZiAoIUdldFdpbmRvd1JlY3QoaHduZCwgb3V0IHIpKSByZXR1cm4gZmFsc2U7CgogICAgICAgIGludCB3ID0gci5SaWdodCAtIHIuTGVmdDsKICAgICAgICBpbnQgaCA9IHIuQm90dG9tIC0gci5Ub3A7CiAgICAgICAgaWYgKHcgPCA0ODAgfHwgaCA8IDM4MCkgcmV0dXJuIGZhbHNlOwoKICAgICAgICAvLyDnmbvlvZXnqpflj6PmsqHmnInlj6/nvKnmlL7ovrnmoYYKICAgICAgICBpbnQgc3R5bGUgPSBHZXRXaW5kb3dMb25nKGh3bmQsIEd3bFN0eWxlKTsKICAgICAgICBpZiAoKHN0eWxlICYgV3NUaGlja2ZyYW1lKSA9PSAwKSByZXR1cm4gZmFsc2U7CgogICAgICAgIHJldHVybiB0cnVlOwogICAgfQoKICAgIHByaXZhdGUgc3RhdGljIHN0cmluZyBXaW5kb3dTaXplVGV4dChJbnRQdHIgaHduZCkKICAgIHsKICAgICAgICBSRUNUIHI7CiAgICAgICAgaWYgKCFHZXRXaW5kb3dSZWN0KGh3bmQsIG91dCByKSkgcmV0dXJuICI/IjsKICAgICAgICByZXR1cm4gKHIuUmlnaHQgLSByLkxlZnQpICsgIngiICsgKHIuQm90dG9tIC0gci5Ub3ApOwogICAgfQoKICAgIC8vLyA8c3VtbWFyeT5yZWFkeSAvIG5vdC1sb2dnZWQtaW4gLyBub3QtZm91bmTvvIznu5nnvZHpobXnnIvnmoTjgII8L3N1bW1hcnk+CiAgICBwcml2YXRlIHN0YXRpYyBzdHJpbmcgV2VDaGF0U3RhdGUoKQogICAgewogICAgICAgIGlmIChfd2VjaGF0SHduZCA9PSBJbnRQdHIuWmVybykgcmV0dXJuICJub3QtZm91bmQiOwogICAgICAgIHJldHVybiBXZUNoYXRMb29rc0xvZ2dlZEluKF93ZWNoYXRId25kKSA/ICJyZWFkeSIgOiAibm90LWxvZ2dlZC1pbiI7CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgYm9vbCBBY3RpdmF0ZVdlQ2hhdCgpCiAgICB7ICAgICAgICBFbnN1cmVXZUNoYXQoKTsKICAgICAgICBpZiAoX3dlY2hhdEh3bmQgPT0gSW50UHRyLlplcm8pIHJldHVybiBmYWxzZTsKCiAgICAgICAgaWYgKElzSWNvbmljKF93ZWNoYXRId25kKSkgU2hvd1dpbmRvdyhfd2VjaGF0SHduZCwgU3dSZXN0b3JlKTsKCiAgICAgICAgLy8gU2V0Rm9yZWdyb3VuZFdpbmRvdyBpcyB1bnJlbGlhYmxlIGZyb20gYSBiYWNrZ3JvdW5kIHByb2Nlc3M7IHRoZQogICAgICAgIC8vIEF0dGFjaFRocmVhZElucHV0IGRhbmNlIGlzIHRoZSBzdGFuZGFyZCB3b3JrYXJvdW5kLgogICAgICAgIHVpbnQgZHVtbXk7CiAgICAgICAgdWludCBmZ1RocmVhZCA9IEdldFdpbmRvd1RocmVhZFByb2Nlc3NJZChHZXRGb3JlZ3JvdW5kV2luZG93KCksIG91dCBkdW1teSk7CiAgICAgICAgdWludCBvdXJUaHJlYWQgPSBHZXRDdXJyZW50VGhyZWFkSWQoKTsKICAgICAgICBib29sIGF0dGFjaGVkID0gZmFsc2U7CiAgICAgICAgdHJ5CiAgICAgICAgewogICAgICAgICAgICBpZiAoZmdUaHJlYWQgIT0gb3VyVGhyZWFkKSBhdHRhY2hlZCA9IEF0dGFjaFRocmVhZElucHV0KGZnVGhyZWFkLCBvdXJUaHJlYWQsIHRydWUpOwogICAgICAgICAgICBCcmluZ1dpbmRvd1RvVG9wKF93ZWNoYXRId25kKTsKICAgICAgICAgICAgU2V0Rm9yZWdyb3VuZFdpbmRvdyhfd2VjaGF0SHduZCk7CiAgICAgICAgICAgIFNldEZvY3VzKF93ZWNoYXRId25kKTsKICAgICAgICB9CiAgICAgICAgZmluYWxseQogICAgICAgIHsKICAgICAgICAgICAgaWYgKGF0dGFjaGVkKSBBdHRhY2hUaHJlYWRJbnB1dChmZ1RocmVhZCwgb3VyVGhyZWFkLCBmYWxzZSk7CiAgICAgICAgfQoKICAgICAgICBUaHJlYWQuU2xlZXAoMTIwKTsKICAgICAgICByZXR1cm4gV2VDaGF0SXNGb3JlZ3JvdW5kKCk7CiAgICB9CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBJbnB1dAogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCgogICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBTZW5kS2V5KHVzaG9ydCB2aywgYm9vbCB1cCkKICAgIHsKICAgICAgICBJTlBVVFtdIHNlcSA9IG5ldyBJTlBVVFsxXTsKICAgICAgICBzZXFbMF0udHlwZSA9IElucHV0S2V5Ym9hcmQ7CiAgICAgICAgc2VxWzBdLlUua2kud1ZrID0gdms7CiAgICAgICAgc2VxWzBdLlUua2kud1NjYW4gPSAwOwogICAgICAgIHNlcVswXS5VLmtpLmR3RmxhZ3MgPSB1cCA/IEtleWV2ZW50ZktleXVwIDogMDsKICAgICAgICBzZXFbMF0uVS5raS50aW1lID0gMDsKICAgICAgICBzZXFbMF0uVS5raS5kd0V4dHJhSW5mbyA9IEludFB0ci5aZXJvOwogICAgICAgIFNlbmRJbnB1dCgxLCBzZXEsIE1hcnNoYWwuU2l6ZU9mKHR5cGVvZihJTlBVVCkpKTsKICAgIH0KCiAgICAvLy8gPHN1bW1hcnk+CiAgICAvLy8gUGFzdGUgdGhlIGdpdmVuIHRleHQgaW50byB0aGUgY3VycmVudGx5IG9wZW4gV2VDaGF0IGNvbnZlcnNhdGlvbi4KICAgIC8vLyBSZXR1cm5zIGEgc3RhdHVzIHN0cmluZyB0aGF0IGlzIHNhZmUgdG8gc2hvdyB0byB0aGUgdXNlci4KICAgIC8vLyA8L3N1bW1hcnk+CiAgICBwcml2YXRlIHN0YXRpYyBzdHJpbmcgU2VuZFRvV2VDaGF0KHN0cmluZyB0ZXh0KQogICAgewogICAgICAgIGlmIChzdHJpbmcuSXNOdWxsT3JFbXB0eSh0ZXh0KSkgcmV0dXJuICJlbXB0eSI7CgogICAgICAgIGlmICghU2V0Q2xpcGJvYXJkVGV4dCh0ZXh0KSkKICAgICAgICB7CiAgICAgICAgICAgIHJldHVybiAiZXJyb3I6IOWGmeWJqui0tOadv+Wksei0pe+8iOWPr+iDveiiq+WFtuWug+eoi+W6j+WNoOeUqO+8ie+8jOW3suS4reatoiI7CiAgICAgICAgfQogICAgICAgIF9sYXN0U2VudFRleHQgPSB0ZXh0OwoKICAgICAgICBpZiAoIUFjdGl2YXRlV2VDaGF0KCkpCiAgICAgICAgewogICAgICAgICAgICAvLyBEZWxpYmVyYXRlbHkgZG8gTk9UIHNlbmQga2V5cyBoZXJlLgogICAgICAgICAgICByZXR1cm4gImVycm9yOiDml6Dms5Xmiorlvq7kv6Hnqpflj6PliIfliLDliY3lj7DvvIzlt7LkuK3mraLvvIjmjInplK7mnKrlj5HpgIHvvIkiOwogICAgICAgIH0KCiAgICAgICAgLy8gUmUtY2hlY2sgcmlnaHQgYmVmb3JlIHR5cGluZy4gVGhpcyBpcyB0aGUgbGFzdCBsaW5lIG9mIGRlZmVuY2UuCiAgICAgICAgaWYgKCFXZUNoYXRJc0ZvcmVncm91bmQoKSkKICAgICAgICB7CiAgICAgICAgICAgIHJldHVybiAiZXJyb3I6IOWJjeWPsOagoemqjOacqumAmui/h++8jOW3suS4reatou+8iOaMiemUruacquWPkemAge+8iSI7CiAgICAgICAgfQoKICAgICAgICAvLyDlrojljavkuInvvJrlvq7kv6Hlv4XpobvlgZzlnKjlt7LnmbvlvZXkuLvnlYzpnaLvvIzliKvmiorlr4bmlofnspjov5vnmbvlvZXkuoznu7TnoIHnqpflj6MKICAgICAgICBpZiAoIVdlQ2hhdExvb2tzTG9nZ2VkSW4oX3dlY2hhdEh3bmQpKQogICAgICAgIHsKICAgICAgICAgICAgcmV0dXJuICJlcnJvcjog5b6u5L+h55yL6LW35p2l5YGc5Zyo55m75b2V55WM6Z2i77yI56qX5Y+jICIgKyBXaW5kb3dTaXplVGV4dChfd2VjaGF0SHduZCkKICAgICAgICAgICAgICAgICArICLvvInvvIzlt7LkuK3mraLjgILor7flhYjlnKjlvq7kv6Hph4znmbvlvZXlubbmiZPlvIDkuIDkuKrlr7nor53jgIIiOwogICAgICAgIH0KCiAgICAgICAgVGhyZWFkLlNsZWVwKDgwKTsKICAgICAgICBTZW5kS2V5KFZrQ29udHJvbCwgZmFsc2UpOwogICAgICAgIFNlbmRLZXkoVmtWLCBmYWxzZSk7CiAgICAgICAgU2VuZEtleShWa1YsIHRydWUpOwogICAgICAgIFNlbmRLZXkoVmtDb250cm9sLCB0cnVlKTsKICAgICAgICBUaHJlYWQuU2xlZXAoNjApOwogICAgICAgIFNlbmRLZXkoVmtSZXR1cm4sIGZhbHNlKTsKICAgICAgICBTZW5kS2V5KFZrUmV0dXJuLCB0cnVlKTsKCiAgICAgICAgcmV0dXJuICJvayI7CiAgICB9CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBTY3JlZW5zaG90IChkZWJ1ZyBhaWQ6IGxldHMgdXMgdmVyaWZ5IGEgbWVzc2FnZSByZWFsbHkgbGFuZGVkKQogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCgogICAgcHJpdmF0ZSBzdGF0aWMgYnl0ZVtdIENhcHR1cmVXZUNoYXQoYm9vbCBmcm9tU2NyZWVuKQogICAgewogICAgICAgIEVuc3VyZVdlQ2hhdCgpOwogICAgICAgIGlmIChfd2VjaGF0SHduZCA9PSBJbnRQdHIuWmVybykgcmV0dXJuIG51bGw7CgogICAgICAgIFJFQ1QgcjsKICAgICAgICBpZiAoIUdldFdpbmRvd1JlY3QoX3dlY2hhdEh3bmQsIG91dCByKSkgcmV0dXJuIG51bGw7CiAgICAgICAgaW50IHcgPSByLlJpZ2h0IC0gci5MZWZ0LCBoID0gci5Cb3R0b20gLSByLlRvcDsKICAgICAgICBpZiAodyA8PSAwIHx8IGggPD0gMCkgcmV0dXJuIG51bGw7CgogICAgICAgIHVzaW5nIChCaXRtYXAgYm1wID0gbmV3IEJpdG1hcCh3LCBoKSkKICAgICAgICB7CiAgICAgICAgICAgIHVzaW5nIChHcmFwaGljcyBnID0gR3JhcGhpY3MuRnJvbUltYWdlKGJtcCkpCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgIEludFB0ciBoZGMgPSBnLkdldEhkYygpOwogICAgICAgICAgICAgICAgdHJ5CiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgICAgaWYgKGZyb21TY3JlZW4pCiAgICAgICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgICAgICAvLyBQcmludFdpbmRvdyBvZnRlbiByZXR1cm5zIGJsYWNrIGZvciBRdC9HUFUgd2luZG93cy4KICAgICAgICAgICAgICAgICAgICAgICAgSW50UHRyIHNyYyA9IEdldFdpbmRvd0RDKF93ZWNoYXRId25kKTsKICAgICAgICAgICAgICAgICAgICAgICAgdHJ5CiAgICAgICAgICAgICAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIC8vIEJpdEJsdCBmcm9tIHRoZSB3aW5kb3cgREMKICAgICAgICAgICAgICAgICAgICAgICAgICAgIEJpdEJsdChoZGMsIDAsIDAsIHcsIGgsIHNyYywgMCwgMCwgMHgwMENDMDAyMCk7CiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAgICAgZmluYWxseSB7IFJlbGVhc2VEQyhfd2VjaGF0SHduZCwgc3JjKTsgfQogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICBlbHNlCiAgICAgICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgICAgICBQcmludFdpbmRvdyhfd2VjaGF0SHduZCwgaGRjLCAyKTsgLy8gUFdfUkVOREVSRlVMTENPTlRFTlQKICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBmaW5hbGx5IHsgZy5SZWxlYXNlSGRjKGhkYyk7IH0KICAgICAgICAgICAgfQoKICAgICAgICAgICAgdXNpbmcgKE1lbW9yeVN0cmVhbSBtcyA9IG5ldyBNZW1vcnlTdHJlYW0oKSkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgYm1wLlNhdmUobXMsIEltYWdlRm9ybWF0LlBuZyk7CiAgICAgICAgICAgICAgICByZXR1cm4gbXMuVG9BcnJheSgpOwogICAgICAgICAgICB9CiAgICAgICAgfQogICAgfQoKICAgIFtEbGxJbXBvcnQoImdkaTMyLmRsbCIpXQogICAgcHJpdmF0ZSBzdGF0aWMgZXh0ZXJuIGJvb2wgQml0Qmx0KEludFB0ciBoZGNEZXN0LCBpbnQgeERlc3QsIGludCB5RGVzdCwgaW50IHcsIGludCBoLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIEludFB0ciBoZGNTcmMsIGludCB4U3JjLCBpbnQgeVNyYywgaW50IHJvcCk7CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBXZWJTb2NrZXQKICAgIC8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQoKICAgIHByaXZhdGUgc3RhdGljIGJvb2wgUmVhZEV4YWN0KE5ldHdvcmtTdHJlYW0gcywgYnl0ZVtdIGJ1ZiwgaW50IG9mZnNldCwgaW50IGNvdW50KQogICAgewogICAgICAgIGludCBkb25lID0gMDsKICAgICAgICB3aGlsZSAoZG9uZSA8IGNvdW50KQogICAgICAgIHsKICAgICAgICAgICAgaW50IG4gPSBzLlJlYWQoYnVmLCBvZmZzZXQgKyBkb25lLCBjb3VudCAtIGRvbmUpOwogICAgICAgICAgICBpZiAobiA8PSAwKSByZXR1cm4gZmFsc2U7CiAgICAgICAgICAgIGRvbmUgKz0gbjsKICAgICAgICB9CiAgICAgICAgcmV0dXJuIHRydWU7CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgYnl0ZVtdIFdzUmVjZWl2ZShOZXR3b3JrU3RyZWFtIHMpCiAgICB7CiAgICAgICAgYnl0ZVtdIGhkciA9IG5ldyBieXRlWzJdOwogICAgICAgIGlmICghUmVhZEV4YWN0KHMsIGhkciwgMCwgMikpIHRocm93IG5ldyBJT0V4Y2VwdGlvbigiY2xvc2VkIik7CgogICAgICAgIGludCBvcGNvZGUgPSBoZHJbMF0gJiAweDBGOwogICAgICAgIGJvb2wgbWFza2VkID0gKGhkclsxXSAmIDB4ODApICE9IDA7CiAgICAgICAgbG9uZyBsZW4gPSBoZHJbMV0gJiAweDdGOwoKICAgICAgICBpZiAobGVuID09IDEyNikKICAgICAgICB7CiAgICAgICAgICAgIGJ5dGVbXSBlID0gbmV3IGJ5dGVbMl07CiAgICAgICAgICAgIGlmICghUmVhZEV4YWN0KHMsIGUsIDAsIDIpKSB0aHJvdyBuZXcgSU9FeGNlcHRpb24oImNsb3NlZCIpOwogICAgICAgICAgICBsZW4gPSAoZVswXSA8PCA4KSB8IGVbMV07CiAgICAgICAgfQogICAgICAgIGVsc2UgaWYgKGxlbiA9PSAxMjcpCiAgICAgICAgewogICAgICAgICAgICBieXRlW10gZSA9IG5ldyBieXRlWzhdOwogICAgICAgICAgICBpZiAoIVJlYWRFeGFjdChzLCBlLCAwLCA4KSkgdGhyb3cgbmV3IElPRXhjZXB0aW9uKCJjbG9zZWQiKTsKICAgICAgICAgICAgbGVuID0gMDsKICAgICAgICAgICAgZm9yIChpbnQgaSA9IDA7IGkgPCA4OyBpKyspIGxlbiA9IChsZW4gPDwgOCkgfCBlW2ldOwogICAgICAgIH0KCiAgICAgICAgYnl0ZVtdIG1hc2sgPSBuZXcgYnl0ZVs0XTsKICAgICAgICBpZiAobWFza2VkICYmICFSZWFkRXhhY3QocywgbWFzaywgMCwgNCkpIHRocm93IG5ldyBJT0V4Y2VwdGlvbigiY2xvc2VkIik7CgogICAgICAgIGJ5dGVbXSBwYXlsb2FkID0gbmV3IGJ5dGVbbGVuXTsKICAgICAgICBpZiAobGVuID4gMCAmJiAhUmVhZEV4YWN0KHMsIHBheWxvYWQsIDAsIChpbnQpbGVuKSkgdGhyb3cgbmV3IElPRXhjZXB0aW9uKCJjbG9zZWQiKTsKCiAgICAgICAgaWYgKG1hc2tlZCkKICAgICAgICAgICAgZm9yIChpbnQgaSA9IDA7IGkgPCBwYXlsb2FkLkxlbmd0aDsgaSsrKSBwYXlsb2FkW2ldID0gKGJ5dGUpKHBheWxvYWRbaV0gXiBtYXNrW2kgJSA0XSk7CgogICAgICAgIC8vIHBhY2sgb3Bjb2RlIGludG8gc2xvdCAwIHNvIHRoZSBjYWxsZXIgZ2V0cyBvbmUgYXJyYXkgYmFjawogICAgICAgIHJldHVybiBDb21iaW5lKG9wY29kZSwgcGF5bG9hZCk7CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgYnl0ZVtdIENvbWJpbmUoaW50IG9wY29kZSwgYnl0ZVtdIHBheWxvYWQpCiAgICB7CiAgICAgICAgYnl0ZVtdIG91dEJ1ZiA9IG5ldyBieXRlW3BheWxvYWQuTGVuZ3RoICsgMV07CiAgICAgICAgb3V0QnVmWzBdID0gKGJ5dGUpb3Bjb2RlOwogICAgICAgIEJ1ZmZlci5CbG9ja0NvcHkocGF5bG9hZCwgMCwgb3V0QnVmLCAxLCBwYXlsb2FkLkxlbmd0aCk7CiAgICAgICAgcmV0dXJuIG91dEJ1ZjsKICAgIH0KCiAgICBwcml2YXRlIHN0YXRpYyB2b2lkIFdzU2VuZChUY3BDbGllbnQgY2xpZW50LCBpbnQgb3Bjb2RlLCBieXRlW10gcGF5bG9hZCkKICAgIHsKICAgICAgICBOZXR3b3JrU3RyZWFtIHMgPSBjbGllbnQuR2V0U3RyZWFtKCk7CiAgICAgICAgYnl0ZVtdIGhkcjsKICAgICAgICBpZiAocGF5bG9hZC5MZW5ndGggPCAxMjYpCiAgICAgICAgewogICAgICAgICAgICBoZHIgPSBuZXcgYnl0ZVsyXTsKICAgICAgICAgICAgaGRyWzBdID0gKGJ5dGUpKDB4ODAgfCBvcGNvZGUpOwogICAgICAgICAgICBoZHJbMV0gPSAoYnl0ZSlwYXlsb2FkLkxlbmd0aDsKICAgICAgICB9CiAgICAgICAgZWxzZSBpZiAocGF5bG9hZC5MZW5ndGggPCA2NTUzNikKICAgICAgICB7CiAgICAgICAgICAgIGhkciA9IG5ldyBieXRlWzRdOwogICAgICAgICAgICBoZHJbMF0gPSAoYnl0ZSkoMHg4MCB8IG9wY29kZSk7CiAgICAgICAgICAgIGhkclsxXSA9IDEyNjsKICAgICAgICAgICAgaGRyWzJdID0gKGJ5dGUpKHBheWxvYWQuTGVuZ3RoID4+IDgpOwogICAgICAgICAgICBoZHJbM10gPSAoYnl0ZSkocGF5bG9hZC5MZW5ndGggJiAweEZGKTsKICAgICAgICB9CiAgICAgICAgZWxzZQogICAgICAgIHsKICAgICAgICAgICAgaGRyID0gbmV3IGJ5dGVbMTBdOwogICAgICAgICAgICBoZHJbMF0gPSAoYnl0ZSkoMHg4MCB8IG9wY29kZSk7CiAgICAgICAgICAgIGhkclsxXSA9IDEyNzsKICAgICAgICAgICAgbG9uZyBsID0gcGF5bG9hZC5MZW5ndGg7CiAgICAgICAgICAgIGZvciAoaW50IGkgPSA5OyBpID49IDI7IGktLSkgeyBoZHJbaV0gPSAoYnl0ZSkobCAmIDB4RkYpOyBsID4+PSA4OyB9CiAgICAgICAgfQogICAgICAgIC8vIOWPqumUgei/meS4gOS4quWuouaIt+err++8jOe7neS4jeeUqOWFqOWxgOmUgeWBmue9kee7nOWGmeOAggogICAgICAgIC8vCiAgICAgICAgLy8g6L+Z6YeM5pu+57uP5pivIGxvY2sgKENsaWVudHNMb2NrKeOAgumCo+aYr+S4quiHtOWRvemUmeivr++8mgogICAgICAgIC8vIOWuouaIt+err+i/nuaOpeS4gOaXpuWPmOaIkOatu+i/nuaOpe+8iOWIt+aWsC/lhbPpl63moIfnrb7pobXjgIHljYrlvIDov57mjqXvvInvvIwKICAgICAgICAvLyBzLldyaXRlIOS8muS4gOebtOmYu+WhnuWIsCBUQ1Ag6YeN5Lyg6LaF5pe277yM6ICMIFRjcENsaWVudCDpu5jorqQKICAgICAgICAvLyBTZW5kVGltZW91dCA9IDAg6KGo56S6Kirml6DpmZDnrYkqKuOAguaUpeedgOWFqOWxgOmUgeeahOmCo+S4que6v+eoi+S4jeaUvuaJi++8jAogICAgICAgIC8vIOS6juaYryBDbGllbnRzLkFkZCAvIEJyb2FkY2FzdCAvIFJlbW92ZUNsaWVudCDlhajpg6jljaHmrbvvvJoKICAgICAgICAvLyAgIC0g5paw5a6i5oi356uv6L+e5b6X5LiK77yIMTAxIOWcqOaLv+mUgeS5i+WJjeWwseWGmeS6hu+8ie+8jOS9huaUtuS4jeWIsCBoZWxsbwogICAgICAgIC8vICAgLSDpobXpnaLnmoQgc2VuZCAvIHN0YXR1cyDlhajpg6jmsqHmnInlm57miacKICAgICAgICAvLyAgIC0gSFRUUCAvc3RhdHVzIOWPjeiAjOeFp+W4uOW6lOetlO+8jOWboOS4uuWug+ivuyBDbGllbnRzLkNvdW50IOaXtuayoeWKoOmUgQogICAgICAgIC8vIOeXh+eKtuWwseaYryLmoaXnnIvnnYDov5jmtLvnnYDvvIxXZWJTb2NrZXQg5b275bqV5ZOR5LqGIuOAggogICAgICAgIGxvY2sgKGNsaWVudCkKICAgICAgICB7CiAgICAgICAgICAgIHMuV3JpdGUoaGRyLCAwLCBoZHIuTGVuZ3RoKTsKICAgICAgICAgICAgcy5Xcml0ZShwYXlsb2FkLCAwLCBwYXlsb2FkLkxlbmd0aCk7CiAgICAgICAgICAgIHMuRmx1c2goKTsKICAgICAgICB9CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBXc1NlbmRUZXh0KFRjcENsaWVudCBjbGllbnQsIHN0cmluZyB0ZXh0KQogICAgewogICAgICAgIFdzU2VuZChjbGllbnQsIE9wVGV4dCwgRW5jb2RpbmcuVVRGOC5HZXRCeXRlcyh0ZXh0KSk7CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBCcm9hZGNhc3Qoc3RyaW5nIGpzb24pCiAgICB7CiAgICAgICAgTGlzdDxUY3BDbGllbnQ+IHNuYXBzaG90OwogICAgICAgIGxvY2sgKENsaWVudHNMb2NrKSBzbmFwc2hvdCA9IG5ldyBMaXN0PFRjcENsaWVudD4oQ2xpZW50cyk7CgogICAgICAgIGZvcmVhY2ggKFRjcENsaWVudCBjIGluIHNuYXBzaG90KQogICAgICAgIHsKICAgICAgICAgICAgdHJ5IHsgV3NTZW5kVGV4dChjLCBqc29uKTsgfQogICAgICAgICAgICBjYXRjaCB7IFJlbW92ZUNsaWVudChjKTsgfQogICAgICAgIH0KICAgIH0KCiAgICBwcml2YXRlIHN0YXRpYyB2b2lkIFJlbW92ZUNsaWVudChUY3BDbGllbnQgYykKICAgIHsKICAgICAgICBsb2NrIChDbGllbnRzTG9jaykgQ2xpZW50cy5SZW1vdmUoYyk7CiAgICAgICAgdHJ5IHsgYy5DbG9zZSgpOyB9IGNhdGNoIHsgfQogICAgfQoKICAgIC8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQogICAgLy8gTWluaW1hbCBKU09OIGhlbHBlcnMgKGF2b2lkIGRlcGVuZGluZyBvbiBhIEpTT04gbGliIGJleW9uZAogICAgLy8gSmF2YVNjcmlwdFNlcmlhbGl6ZXIsIHdoaWNoIHNoaXBzIHdpdGggLk5FVCBGcmFtZXdvcmspCiAgICAvLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCiAgICBwcml2YXRlIHN0YXRpYyBzdHJpbmcgSnNvbkVzY2FwZShzdHJpbmcgcykKICAgIHsKICAgICAgICBTdHJpbmdCdWlsZGVyIHNiID0gbmV3IFN0cmluZ0J1aWxkZXIoKTsKICAgICAgICBmb3JlYWNoIChjaGFyIGMgaW4gcykKICAgICAgICB7CiAgICAgICAgICAgIHN3aXRjaCAoYykKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgY2FzZSAnIic6IHNiLkFwcGVuZCgiXFxcIiIpOyBicmVhazsKICAgICAgICAgICAgICAgIGNhc2UgJ1xcJzogc2IuQXBwZW5kKCJcXFxcIik7IGJyZWFrOwogICAgICAgICAgICAgICAgY2FzZSAnXG4nOiBzYi5BcHBlbmQoIlxcbiIpOyBicmVhazsKICAgICAgICAgICAgICAgIGNhc2UgJ1xyJzogc2IuQXBwZW5kKCJcXHIiKTsgYnJlYWs7CiAgICAgICAgICAgICAgICBjYXNlICdcdCc6IHNiLkFwcGVuZCgiXFx0Iik7IGJyZWFrOwogICAgICAgICAgICAgICAgZGVmYXVsdDoKICAgICAgICAgICAgICAgICAgICBpZiAoYyA8IDB4MjApIHNiLkFwcGVuZCgiXFx1IikuQXBwZW5kKCgoaW50KWMpLlRvU3RyaW5nKCJ4NCIpKTsKICAgICAgICAgICAgICAgICAgICBlbHNlIHNiLkFwcGVuZChjKTsKICAgICAgICAgICAgICAgICAgICBicmVhazsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICByZXR1cm4gc2IuVG9TdHJpbmcoKTsKICAgIH0KCiAgICBwcml2YXRlIHN0YXRpYyBzdHJpbmcgTXNnKHN0cmluZyB0eXBlLCBzdHJpbmcgZXh0cmFLZXksIHN0cmluZyBleHRyYVZhbCkKICAgIHsKICAgICAgICBzdHJpbmcgcyA9ICJ7XCJ0eXBlXCI6XCIiICsgSnNvbkVzY2FwZSh0eXBlKSArICJcIiI7CiAgICAgICAgaWYgKGV4dHJhS2V5ICE9IG51bGwpIHMgKz0gIixcIiIgKyBKc29uRXNjYXBlKGV4dHJhS2V5KSArICJcIjpcIiIgKyBKc29uRXNjYXBlKGV4dHJhVmFsKSArICJcIiI7CiAgICAgICAgcmV0dXJuIHMgKyAifSI7CiAgICB9CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBDbGlwYm9hcmQgd2F0Y2hlciB0aHJlYWQKICAgIC8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQoKICAgIHByaXZhdGUgc3RhdGljIHZvaWQgQ2xpcGJvYXJkV2F0Y2hlcigpCiAgICB7CiAgICAgICAgdWludCBsYXN0ID0gR2V0Q2xpcGJvYXJkU2VxdWVuY2VOdW1iZXIoKTsKICAgICAgICB3aGlsZSAodHJ1ZSkKICAgICAgICB7CiAgICAgICAgICAgIHRyeQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBUaHJlYWQuU2xlZXAoNDAwKTsKICAgICAgICAgICAgICAgIHVpbnQgbm93ID0gR2V0Q2xpcGJvYXJkU2VxdWVuY2VOdW1iZXIoKTsKICAgICAgICAgICAgICAgIGlmIChub3cgPT0gbGFzdCkgY29udGludWU7CiAgICAgICAgICAgICAgICBsYXN0ID0gbm93OwoKICAgICAgICAgICAgICAgIHN0cmluZyB0ZXh0ID0gR2V0Q2xpcGJvYXJkVGV4dCgpOwogICAgICAgICAgICAgICAgaWYgKHN0cmluZy5Jc051bGxPckVtcHR5KHRleHQpKSBjb250aW51ZTsKICAgICAgICAgICAgICAgIGlmICh0ZXh0ID09IF9sYXN0U2VudFRleHQpIGNvbnRpbnVlOyAgIC8vIGRvIG5vdCBlY2hvIG91ciBvd24gcGFzdGUKCiAgICAgICAgICAgICAgICBMb2coIuWJqui0tOadv+WPmOWMliAtPiDmjqjnu5nnvZHpobUgKCIgKyB0ZXh0Lkxlbmd0aCArICIg5a2X56ymKSIpOwogICAgICAgICAgICAgICAgQnJvYWRjYXN0KCJ7XCJ0eXBlXCI6XCJjbGlwYm9hcmRcIixcInRleHRcIjpcIiIgKyBKc29uRXNjYXBlKHRleHQpICsgIlwifSIpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIGNhdGNoIChFeGNlcHRpb24gZXgpCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgIExvZygi5Ymq6LS05p2/55uR5ZCs5byC5bi4OiAiICsgZXguTWVzc2FnZSk7CiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICB9CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBIVFRQIC8gV1MgY29ubmVjdGlvbiBoYW5kbGluZwogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCgogICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBIYW5kbGVDbGllbnQob2JqZWN0IHN0YXRlKQogICAgewogICAgICAgIFRjcENsaWVudCBjbGllbnQgPSAoVGNwQ2xpZW50KXN0YXRlOwogICAgICAgIHRyeQogICAgICAgIHsKICAgICAgICAgICAgY2xpZW50Lk5vRGVsYXkgPSB0cnVlOwogICAgICAgICAgICBOZXR3b3JrU3RyZWFtIHN0cmVhbSA9IGNsaWVudC5HZXRTdHJlYW0oKTsKCiAgICAgICAgICAgIC8vIC0tLSByZWFkIHJlcXVlc3QgaGVhZGVycyAtLS0KICAgICAgICAgICAgTWVtb3J5U3RyZWFtIGhlYWQgPSBuZXcgTWVtb3J5U3RyZWFtKCk7CiAgICAgICAgICAgIGJ5dGVbXSBvbmUgPSBuZXcgYnl0ZVsxXTsKICAgICAgICAgICAgaW50IG1hdGNoZWQgPSAwOwogICAgICAgICAgICB3aGlsZSAobWF0Y2hlZCA8IDQpCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgIGludCBuID0gc3RyZWFtLlJlYWQob25lLCAwLCAxKTsKICAgICAgICAgICAgICAgIGlmIChuIDw9IDApIHsgY2xpZW50LkNsb3NlKCk7IHJldHVybjsgfQogICAgICAgICAgICAgICAgaGVhZC5Xcml0ZUJ5dGUob25lWzBdKTsKICAgICAgICAgICAgICAgIGlmICgobWF0Y2hlZCA9PSAwIHx8IG1hdGNoZWQgPT0gMikgJiYgb25lWzBdID09IChieXRlKSdccicpIG1hdGNoZWQrKzsKICAgICAgICAgICAgICAgIGVsc2UgaWYgKChtYXRjaGVkID09IDEgfHwgbWF0Y2hlZCA9PSAzKSAmJiBvbmVbMF0gPT0gKGJ5dGUpJ1xuJykgbWF0Y2hlZCsrOwogICAgICAgICAgICAgICAgZWxzZSBtYXRjaGVkID0gMDsKICAgICAgICAgICAgICAgIGlmIChoZWFkLkxlbmd0aCA+IDY1NTM2KSB7IGNsaWVudC5DbG9zZSgpOyByZXR1cm47IH0KICAgICAgICAgICAgfQoKICAgICAgICAgICAgc3RyaW5nIGhlYWRlclRleHQgPSBFbmNvZGluZy5VVEY4LkdldFN0cmluZyhoZWFkLlRvQXJyYXkoKSk7CiAgICAgICAgICAgIHN0cmluZyByZXF1ZXN0TGluZSA9IGhlYWRlclRleHQuU3BsaXQoJ1xuJylbMF0uVHJpbSgpOwogICAgICAgICAgICBzdHJpbmcgcGF0aCA9ICIvIjsKICAgICAgICAgICAgc3RyaW5nW10gcGFydHMgPSByZXF1ZXN0TGluZS5TcGxpdCgnICcpOwogICAgICAgICAgICBpZiAocGFydHMuTGVuZ3RoID49IDIpIHBhdGggPSBwYXJ0c1sxXTsKCiAgICAgICAgICAgIGJvb2wgaXNXcyA9IGhlYWRlclRleHQuSW5kZXhPZigiVXBncmFkZTogd2Vic29ja2V0IiwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsSWdub3JlQ2FzZSkgPj0gMDsKCiAgICAgICAgICAgIGlmIChpc1dzKQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBIYW5kbGVXZWJTb2NrZXQoY2xpZW50LCBzdHJlYW0sIGhlYWRlclRleHQpOwogICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICB9CgogICAgICAgICAgICBpZiAocGF0aC5TdGFydHNXaXRoKCIvc2hvdCIpKQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBib29sIGZyb21TY3JlZW4gPSBwYXRoLkluZGV4T2YoInNjcmVlbj0xIikgPj0gMDsKICAgICAgICAgICAgICAgIGJ5dGVbXSBwbmcgPSBDYXB0dXJlV2VDaGF0KGZyb21TY3JlZW4pOwogICAgICAgICAgICAgICAgaWYgKHBuZyA9PSBudWxsKQogICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgIGJ5dGVbXSBlcnIgPSBFbmNvZGluZy5VVEY4LkdldEJ5dGVzKCJubyB3ZWNoYXQgd2luZG93Iik7CiAgICAgICAgICAgICAgICAgICAgV3JpdGVIdHRwKHN0cmVhbSwgIjUwMyBTZXJ2aWNlIFVuYXZhaWxhYmxlIiwgInRleHQvcGxhaW4iLCBlcnIpOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgZWxzZQogICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgIFdyaXRlSHR0cChzdHJlYW0sICIyMDAgT0siLCAiaW1hZ2UvcG5nIiwgcG5nKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIGNsaWVudC5DbG9zZSgpOwogICAgICAgICAgICAgICAgcmV0dXJuOwogICAgICAgICAgICB9CgogICAgICAgICAgICBpZiAocGF0aC5TdGFydHNXaXRoKCIvd2luY2hlY2siKSkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgLy8g6LCD6K+V55So77ya5a+55Lu75oSP56qX5Y+j5Y+l5p+E6LeR5LiA6YGNIuW3sueZu+W9lSLlkK/lj5HlvI/vvIzmlrnkvr/pqozor4HmiqTmoI/mnKzouqvjgIIKICAgICAgICAgICAgICAgIC8vIOS+izogL3dpbmNoZWNrP2h3bmQ9MTk4MDQyCiAgICAgICAgICAgICAgICBJbnRQdHIgdGFyZ2V0ID0gX3dlY2hhdEh3bmQ7CiAgICAgICAgICAgICAgICBpbnQgcSA9IHBhdGguSW5kZXhPZigiaHduZD0iKTsKICAgICAgICAgICAgICAgIGlmIChxID49IDApCiAgICAgICAgICAgICAgICB7CiAgICAgICAgICAgICAgICAgICAgc3RyaW5nIG51bSA9IHBhdGguU3Vic3RyaW5nKHEgKyA1KS5TcGxpdCgnJicpWzBdOwogICAgICAgICAgICAgICAgICAgIGxvbmcgdjsKICAgICAgICAgICAgICAgICAgICBpZiAobG9uZy5UcnlQYXJzZShudW0sIG91dCB2KSkgdGFyZ2V0ID0gbmV3IEludFB0cih2KTsKICAgICAgICAgICAgICAgIH0KCiAgICAgICAgICAgICAgICBSRUNUIHJyID0gbmV3IFJFQ1QoKTsKICAgICAgICAgICAgICAgIGlmICh0YXJnZXQgIT0gSW50UHRyLlplcm8pIEdldFdpbmRvd1JlY3QodGFyZ2V0LCBvdXQgcnIpOwogICAgICAgICAgICAgICAgaW50IHcgPSByci5SaWdodCAtIHJyLkxlZnQ7CiAgICAgICAgICAgICAgICBpbnQgaCA9IHJyLkJvdHRvbSAtIHJyLlRvcDsKICAgICAgICAgICAgICAgIGludCBzdCA9IHRhcmdldCAhPSBJbnRQdHIuWmVybyA/IEdldFdpbmRvd0xvbmcodGFyZ2V0LCBHd2xTdHlsZSkgOiAwOwogICAgICAgICAgICAgICAgYm9vbCB0aGljayA9IChzdCAmIFdzVGhpY2tmcmFtZSkgIT0gMDsKCiAgICAgICAgICAgICAgICBzdHJpbmcgamogPSAie1wiaHduZFwiOiIgKyB0YXJnZXQuVG9JbnQ2NCgpCiAgICAgICAgICAgICAgICAgICAgICAgICAgKyAiLFwid1wiOiIgKyB3ICsgIixcImhcIjoiICsgaAogICAgICAgICAgICAgICAgICAgICAgICAgICsgIixcInRoaWNrZnJhbWVcIjoiICsgKHRoaWNrID8gInRydWUiIDogImZhbHNlIikKICAgICAgICAgICAgICAgICAgICAgICAgICArICIsXCJsb2dnZWRJblwiOiIgKyAodGFyZ2V0ICE9IEludFB0ci5aZXJvICYmIFdlQ2hhdExvb2tzTG9nZ2VkSW4odGFyZ2V0KSA/ICJ0cnVlIiA6ICJmYWxzZSIpCiAgICAgICAgICAgICAgICAgICAgICAgICAgKyAifSI7CiAgICAgICAgICAgICAgICBXcml0ZUh0dHAoc3RyZWFtLCAiMjAwIE9LIiwgImFwcGxpY2F0aW9uL2pzb247IGNoYXJzZXQ9dXRmLTgiLCBFbmNvZGluZy5VVEY4LkdldEJ5dGVzKGpqKSk7CiAgICAgICAgICAgICAgICBjbGllbnQuQ2xvc2UoKTsKICAgICAgICAgICAgICAgIHJldHVybjsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgaWYgKHBhdGguU3RhcnRzV2l0aCgiL3N0YXR1cyIpKQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBFbnN1cmVXZUNoYXQoKTsKICAgICAgICAgICAgICAgIGJvb2wgaGF2ZSA9IF93ZWNoYXRId25kICE9IEludFB0ci5aZXJvOwogICAgICAgICAgICAgICAgc3RyaW5nIGogPSAie1wid2VjaGF0XCI6IiArIChoYXZlID8gInRydWUiIDogImZhbHNlIikKICAgICAgICAgICAgICAgICAgICAgICAgICsgIixcInBpZFwiOiIgKyBfd2VjaGF0UGlkCiAgICAgICAgICAgICAgICAgICAgICAgICArICIsXCJsb2dnZWRJblwiOiIgKyAoaGF2ZSAmJiBXZUNoYXRMb29rc0xvZ2dlZEluKF93ZWNoYXRId25kKSA/ICJ0cnVlIiA6ICJmYWxzZSIpCiAgICAgICAgICAgICAgICAgICAgICAgICArICIsXCJzaXplXCI6XCIiICsgKGhhdmUgPyBXaW5kb3dTaXplVGV4dChfd2VjaGF0SHduZCkgOiAiLSIpICsgIlwiIgogICAgICAgICAgICAgICAgICAgICAgICAgKyAiLFwiZm9yZWdyb3VuZFwiOiIgKyAoV2VDaGF0SXNGb3JlZ3JvdW5kKCkgPyAidHJ1ZSIgOiAiZmFsc2UiKQogICAgICAgICAgICAgICAgICAgICAgICAgKyAiLFwiY2xpZW50c1wiOiIgKyBDbGllbnRzLkNvdW50ICsgIn0iOwogICAgICAgICAgICAgICAgV3JpdGVIdHRwKHN0cmVhbSwgIjIwMCBPSyIsICJhcHBsaWNhdGlvbi9qc29uOyBjaGFyc2V0PXV0Zi04IiwgRW5jb2RpbmcuVVRGOC5HZXRCeXRlcyhqKSk7CiAgICAgICAgICAgICAgICBjbGllbnQuQ2xvc2UoKTsKICAgICAgICAgICAgICAgIHJldHVybjsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgLy8gc3RhdGljCiAgICAgICAgICAgIGlmIChGaWxlLkV4aXN0cyhfcGFnZVBhdGgpKQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBieXRlW10gaHRtbCA9IEZpbGUuUmVhZEFsbEJ5dGVzKF9wYWdlUGF0aCk7CiAgICAgICAgICAgICAgICBXcml0ZUh0dHAoc3RyZWFtLCAiMjAwIE9LIiwgInRleHQvaHRtbDsgY2hhcnNldD11dGYtOCIsIGh0bWwpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIGVsc2UKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgV3JpdGVIdHRwKHN0cmVhbSwgIjQwNCBOb3QgRm91bmQiLCAidGV4dC9wbGFpbiIsCiAgICAgICAgICAgICAgICAgICAgICAgICAgRW5jb2RpbmcuVVRGOC5HZXRCeXRlcygiaW0uaHRtbCBub3QgZm91bmQgbmV4dCB0byB0aGUgZXhlIikpOwogICAgICAgICAgICB9CiAgICAgICAgICAgIGNsaWVudC5DbG9zZSgpOwogICAgICAgIH0KICAgICAgICBjYXRjaCAoRXhjZXB0aW9uIGV4KQogICAgICAgIHsKICAgICAgICAgICAgTG9nKCLov57mjqXlvILluLg6ICIgKyBleC5NZXNzYWdlKTsKICAgICAgICAgICAgdHJ5IHsgY2xpZW50LkNsb3NlKCk7IH0gY2F0Y2ggeyB9CiAgICAgICAgfQogICAgfQoKICAgIHByaXZhdGUgc3RhdGljIHZvaWQgV3JpdGVIdHRwKE5ldHdvcmtTdHJlYW0gcywgc3RyaW5nIHN0YXR1cywgc3RyaW5nIGNvbnRlbnRUeXBlLCBieXRlW10gYm9keSkKICAgIHsKICAgICAgICBzdHJpbmcgaGVhZCA9ICJIVFRQLzEuMSAiICsgc3RhdHVzICsgIlxyXG4iCiAgICAgICAgICAgICAgICAgICAgKyAiQ29udGVudC1UeXBlOiAiICsgY29udGVudFR5cGUgKyAiXHJcbiIKICAgICAgICAgICAgICAgICAgICArICJDb250ZW50LUxlbmd0aDogIiArIGJvZHkuTGVuZ3RoICsgIlxyXG4iCiAgICAgICAgICAgICAgICAgICAgKyAiQWNjZXNzLUNvbnRyb2wtQWxsb3ctT3JpZ2luOiAqXHJcbiIKICAgICAgICAgICAgICAgICAgICArICJDYWNoZS1Db250cm9sOiBuby1zdG9yZVxyXG4iCiAgICAgICAgICAgICAgICAgICAgKyAiQ29ubmVjdGlvbjogY2xvc2VcclxuXHJcbiI7CiAgICAgICAgYnl0ZVtdIGhiID0gRW5jb2RpbmcuQVNDSUkuR2V0Qnl0ZXMoaGVhZCk7CiAgICAgICAgcy5Xcml0ZShoYiwgMCwgaGIuTGVuZ3RoKTsKICAgICAgICBzLldyaXRlKGJvZHksIDAsIGJvZHkuTGVuZ3RoKTsKICAgICAgICBzLkZsdXNoKCk7CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBIYW5kbGVXZWJTb2NrZXQoVGNwQ2xpZW50IGNsaWVudCwgTmV0d29ya1N0cmVhbSBzdHJlYW0sIHN0cmluZyBoZWFkZXJUZXh0KQogICAgewogICAgICAgIHN0cmluZyBrZXkgPSBudWxsOwogICAgICAgIHN0cmluZ1tdIGxpbmVzID0gaGVhZGVyVGV4dC5TcGxpdCgnXG4nKTsKICAgICAgICBmb3JlYWNoIChzdHJpbmcgbGluZSBpbiBsaW5lcykKICAgICAgICB7CiAgICAgICAgICAgIGludCBpZHggPSBsaW5lLkluZGV4T2YoJzonKTsKICAgICAgICAgICAgaWYgKGlkeCA8PSAwKSBjb250aW51ZTsKICAgICAgICAgICAgc3RyaW5nIG5hbWUgPSBsaW5lLlN1YnN0cmluZygwLCBpZHgpLlRyaW0oKTsKICAgICAgICAgICAgc3RyaW5nIHZhbCA9IGxpbmUuU3Vic3RyaW5nKGlkeCArIDEpLlRyaW0oKTsKICAgICAgICAgICAgaWYgKHN0cmluZy5FcXVhbHMobmFtZSwgIlNlYy1XZWJTb2NrZXQtS2V5IiwgU3RyaW5nQ29tcGFyaXNvbi5PcmRpbmFsSWdub3JlQ2FzZSkpIGtleSA9IHZhbDsKICAgICAgICB9CiAgICAgICAgaWYgKGtleSA9PSBudWxsKSB7IGNsaWVudC5DbG9zZSgpOyByZXR1cm47IH0KCiAgICAgICAgYnl0ZVtdIHNoYTsKICAgICAgICB1c2luZyAoU0hBMSBzaGExID0gU0hBMS5DcmVhdGUoKSkKICAgICAgICAgICAgc2hhID0gc2hhMS5Db21wdXRlSGFzaChFbmNvZGluZy5BU0NJSS5HZXRCeXRlcyhrZXkgKyBXc01hZ2ljKSk7CiAgICAgICAgc3RyaW5nIGFjY2VwdCA9IENvbnZlcnQuVG9CYXNlNjRTdHJpbmcoc2hhKTsKCiAgICAgICAgc3RyaW5nIHJlc3AgPSAiSFRUUC8xLjEgMTAxIFN3aXRjaGluZyBQcm90b2NvbHNcclxuIgogICAgICAgICAgICAgICAgICAgICsgIlVwZ3JhZGU6IHdlYnNvY2tldFxyXG4iCiAgICAgICAgICAgICAgICAgICAgKyAiQ29ubmVjdGlvbjogVXBncmFkZVxyXG4iCiAgICAgICAgICAgICAgICAgICAgKyAiU2VjLVdlYlNvY2tldC1BY2NlcHQ6ICIgKyBhY2NlcHQgKyAiXHJcblxyXG4iOwogICAgICAgIGJ5dGVbXSByYiA9IEVuY29kaW5nLkFTQ0lJLkdldEJ5dGVzKHJlc3ApOwogICAgICAgIHN0cmVhbS5Xcml0ZShyYiwgMCwgcmIuTGVuZ3RoKTsKICAgICAgICBzdHJlYW0uRmx1c2goKTsKCiAgICAgICAgbG9jayAoQ2xpZW50c0xvY2spIENsaWVudHMuQWRkKGNsaWVudCk7CiAgICAgICAgTG9nKCJXUyDlt7Lov57mjqUgKCIgKyBDbGllbnRzLkNvdW50ICsgIiDkuKopIik7CgogICAgICAgIHRyeQogICAgICAgIHsKICAgICAgICAgICAgV3NTZW5kVGV4dChjbGllbnQsIE1zZygiaGVsbG8iLCAiYmFja2VuZCIsICJ3ZWNoYXQtY2xpcGJvYXJkIikpOwogICAgICAgICAgICBXc1NlbmRUZXh0KGNsaWVudCwgTXNnKCJzdGF0dXMiLCAid2VjaGF0IiwgV2VDaGF0U3RhdGUoKSkpOwoKICAgICAgICAgICAgSmF2YVNjcmlwdFNlcmlhbGl6ZXIgc2VyID0gbmV3IEphdmFTY3JpcHRTZXJpYWxpemVyKCk7CiAgICAgICAgICAgIHdoaWxlICh0cnVlKQogICAgICAgICAgICB7CiAgICAgICAgICAgICAgICBieXRlW10gZnJhbWUgPSBXc1JlY2VpdmUoc3RyZWFtKTsKICAgICAgICAgICAgICAgIGludCBvcGNvZGUgPSBmcmFtZVswXTsKICAgICAgICAgICAgICAgIGJ5dGVbXSBwYXlsb2FkID0gbmV3IGJ5dGVbZnJhbWUuTGVuZ3RoIC0gMV07CiAgICAgICAgICAgICAgICBCdWZmZXIuQmxvY2tDb3B5KGZyYW1lLCAxLCBwYXlsb2FkLCAwLCBwYXlsb2FkLkxlbmd0aCk7CgogICAgICAgICAgICAgICAgaWYgKG9wY29kZSA9PSBPcENsb3NlKSBicmVhazsKICAgICAgICAgICAgICAgIGlmIChvcGNvZGUgPT0gT3BQaW5nKSB7IFdzU2VuZChjbGllbnQsIE9wUG9uZywgcGF5bG9hZCk7IGNvbnRpbnVlOyB9CiAgICAgICAgICAgICAgICBpZiAob3Bjb2RlICE9IE9wVGV4dCkgY29udGludWU7CgogICAgICAgICAgICAgICAgc3RyaW5nIHRleHQgPSBFbmNvZGluZy5VVEY4LkdldFN0cmluZyhwYXlsb2FkKTsKICAgICAgICAgICAgICAgIExvZygi5pS25Yiw5paH5pys5binICIgKyBwYXlsb2FkLkxlbmd0aCArICIg5a2X6IqCIG9wY29kZT0iICsgb3Bjb2RlICsgIiA6ICIKICAgICAgICAgICAgICAgICAgICArICh0ZXh0Lkxlbmd0aCA+IDkwID8gdGV4dC5TdWJzdHJpbmcoMCwgOTApICsgIi4uLiIgOiB0ZXh0KSk7CgogICAgICAgICAgICAgICAgRGljdGlvbmFyeTxzdHJpbmcsIG9iamVjdD4gbXNnID0gbnVsbDsKICAgICAgICAgICAgICAgIHRyeSB7IG1zZyA9IHNlci5EZXNlcmlhbGl6ZTxEaWN0aW9uYXJ5PHN0cmluZywgb2JqZWN0Pj4odGV4dCk7IH0KICAgICAgICAgICAgICAgIGNhdGNoIChFeGNlcHRpb24gamV4KSB7IExvZygiSlNPTiDop6PmnpDlpLHotKU6ICIgKyBqZXguTWVzc2FnZSk7IH0KCiAgICAgICAgICAgICAgICBpZiAobXNnID09IG51bGwpIHsgTG9nKCJKU09OIOino+aekOe7k+aenOS4uuepuu+8jOS4ouW8g+i/meS4gOW4pyIpOyBjb250aW51ZTsgfQogICAgICAgICAgICAgICAgb2JqZWN0IHQ7CiAgICAgICAgICAgICAgICBpZiAoIW1zZy5UcnlHZXRWYWx1ZSgidHlwZSIsIG91dCB0KSkgY29udGludWU7CiAgICAgICAgICAgICAgICBzdHJpbmcgdHlwZSA9IENvbnZlcnQuVG9TdHJpbmcodCk7CgogICAgICAgICAgICAgICAgaWYgKHR5cGUgPT0gInNlbmQiKQogICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgIG9iamVjdCBib2R5T2JqOwogICAgICAgICAgICAgICAgICAgIHN0cmluZyBib2R5ID0gbXNnLlRyeUdldFZhbHVlKCJ0ZXh0Iiwgb3V0IGJvZHlPYmopID8gQ29udmVydC5Ub1N0cmluZyhib2R5T2JqKSA6ICIiOwoKICAgICAgICAgICAgICAgICAgICBMb2coIuWPkemAgSAtPiDlvq7kv6EgKCIgKyAoYm9keSA9PSBudWxsID8gMCA6IGJvZHkuTGVuZ3RoKSArICIg5a2X56ymKSIpOwogICAgICAgICAgICAgICAgICAgIHN0cmluZyByZXN1bHQgPSBTZW5kVG9XZUNoYXQoYm9keSk7CiAgICAgICAgICAgICAgICAgICAgTG9nKCLnu5Pmnpw6ICIgKyByZXN1bHQpOwoKICAgICAgICAgICAgICAgICAgICBXc1NlbmRUZXh0KGNsaWVudCwgIntcInR5cGVcIjpcInNlbnRcIixcIm9rXCI6IiArIChyZXN1bHQgPT0gIm9rIiA/ICJ0cnVlIiA6ICJmYWxzZSIpCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICArICIsXCJkZXRhaWxcIjpcIiIgKyBKc29uRXNjYXBlKHJlc3VsdCkgKyAiXCJ9Iik7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBlbHNlIGlmICh0eXBlID09ICJzdGF0dXMiKQogICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgIEVuc3VyZVdlQ2hhdCgpOwogICAgICAgICAgICAgICAgICAgIFdzU2VuZFRleHQoY2xpZW50LCBNc2coInN0YXR1cyIsICJ3ZWNoYXQiLCBXZUNoYXRTdGF0ZSgpKSk7CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICB9CiAgICAgICAgY2F0Y2ggKEV4Y2VwdGlvbiBleCkKICAgICAgICB7CiAgICAgICAgICAgIExvZygiV1Mg5pat5byAOiAiICsgZXguTWVzc2FnZSk7CiAgICAgICAgfQogICAgICAgIGZpbmFsbHkKICAgICAgICB7CiAgICAgICAgICAgIFJlbW92ZUNsaWVudChjbGllbnQpOwogICAgICAgICAgICBMb2coIldTIOW3suaWreW8gCAoIiArIENsaWVudHMuQ291bnQgKyAiIOS4qikiKTsKICAgICAgICB9CiAgICB9CgogICAgLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCiAgICAvLyBNYWluCiAgICAvLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCiAgICBwcml2YXRlIHN0YXRpYyBpbnQgTWFpbihzdHJpbmdbXSBhcmdzKQogICAgewogICAgICAgIHRyeSB7IENvbnNvbGUuT3V0cHV0RW5jb2RpbmcgPSBFbmNvZGluZy5VVEY4OyB9CiAgICAgICAgY2F0Y2ggeyB9CgogICAgICAgIGludCBwb3J0ID0gUG9ydDsKICAgICAgICBib29sIG9wZW5Ccm93c2VyID0gdHJ1ZTsKICAgICAgICBmb3IgKGludCBpID0gMDsgaSA8IGFyZ3MuTGVuZ3RoOyBpKyspCiAgICAgICAgewogICAgICAgICAgICBpZiAoYXJnc1tpXSA9PSAiLS1wb3J0IiAmJiBpICsgMSA8IGFyZ3MuTGVuZ3RoKSBwb3J0ID0gaW50LlBhcnNlKGFyZ3NbaSArIDFdLCBDdWx0dXJlSW5mby5JbnZhcmlhbnRDdWx0dXJlKTsKICAgICAgICAgICAgaWYgKGFyZ3NbaV0gPT0gIi0tbm8tb3BlbiIpIG9wZW5Ccm93c2VyID0gZmFsc2U7CiAgICAgICAgfQoKICAgICAgICAvLyDpobXpnaLkuI3mmK/lv4XpobvnmoTvvJpjaGF0Lmh0bWwg55SoIGZpbGU6Ly8g55u05o6l5omT5byA5Lmf6IO96L+e5LiK6L+Z5LiqIFdlYlNvY2tldOOAggogICAgICAgIC8vIOaJgOS7pei/memHjOWPquaYryLmnInlsLHpobrkvr/miZjnrqHlubboh6rliqjlvIDmtY/op4jlmagi77yM5rKh5pyJ5Lmf54Wn5qC35bel5L2c44CCCiAgICAgICAgc3RyaW5nIGJhc2VEaXIgPSBBcHBEb21haW4uQ3VycmVudERvbWFpbi5CYXNlRGlyZWN0b3J5OwogICAgICAgIHN0cmluZ1tdIGNhbmRpZGF0ZXMgPSBuZXcgc3RyaW5nW10geyAiY2hhdC5odG1sIiwgImltLmh0bWwiIH07CiAgICAgICAgZm9yIChpbnQgaSA9IDA7IGkgPCBjYW5kaWRhdGVzLkxlbmd0aDsgaSsrKQogICAgICAgIHsKICAgICAgICAgICAgc3RyaW5nIHAgPSBQYXRoLkNvbWJpbmUoYmFzZURpciwgY2FuZGlkYXRlc1tpXSk7CiAgICAgICAgICAgIGlmIChGaWxlLkV4aXN0cyhwKSkgeyBfcGFnZVBhdGggPSBwOyBicmVhazsgfQogICAgICAgIH0KICAgICAgICBpZiAoX3BhZ2VQYXRoID09IG51bGwpIF9wYWdlUGF0aCA9IFBhdGguQ29tYmluZShiYXNlRGlyLCAiaW0uaHRtbCIpOwogICAgICAgIGJvb2wgaGF2ZVBhZ2UgPSBGaWxlLkV4aXN0cyhfcGFnZVBhdGgpOwoKICAgICAgICBMb2coIldlQ2hhdCDliarotLTmnb/moaUgICguTkVUIEZyYW1ld29yayAvIEMjIDUpIik7CiAgICAgICAgTG9nKCJXZWJTb2NrZXQgIHdzOi8vIiArIEhvc3QgKyAiOiIgKyBwb3J0ICsgIi93cyIpOwogICAgICAgIGlmIChoYXZlUGFnZSkKICAgICAgICAgICAgTG9nKCLpobXpnaIgICAiICsgX3BhZ2VQYXRoKTsKICAgICAgICBlbHNlCiAgICAgICAgICAgIExvZygi6aG16Z2iICAg5peg77yI5LiN5b2x5ZON5L2/55So77yM55u05o6l5Y+M5Ye7IGNoYXQuaHRtbCDljbPlj6/vvIkiKTsKCiAgICAgICAgRmluZFdlQ2hhdCgpOwogICAgICAgIGlmIChfd2VjaGF0SHduZCA9PSBJbnRQdHIuWmVybykKICAgICAgICAgICAgTG9nKCLorablkYo6IOayoeaJvuWIsOW+ruS/oeeql+WPo++8jOivt+WFiOaKiuW+ruS/oeS4u+eql+WPo+aJk+W8gCIpOwogICAgICAgIGVsc2UKICAgICAgICAgICAgTG9nKCLlvq7kv6Hnqpflj6Plt7LlsLHnu6oiKTsKCiAgICAgICAgVGhyZWFkIHdhdGNoZXIgPSBuZXcgVGhyZWFkKENsaXBib2FyZFdhdGNoZXIpOwogICAgICAgIHdhdGNoZXIuSXNCYWNrZ3JvdW5kID0gdHJ1ZTsKICAgICAgICB3YXRjaGVyLlN0YXJ0KCk7CgogICAgICAgIFRjcExpc3RlbmVyIGxpc3RlbmVyID0gbmV3IFRjcExpc3RlbmVyKElQQWRkcmVzcy5Mb29wYmFjaywgcG9ydCk7CiAgICAgICAgbGlzdGVuZXIuU3RhcnQoKTsKICAgICAgICBMb2coIuebkeWQrOS4rS4uLiAgQ3RybCtDIOmAgOWHuiIpOwoKICAgICAgICBpZiAob3BlbkJyb3dzZXIpCiAgICAgICAgewogICAgICAgICAgICBpZiAoaGF2ZVBhZ2UpCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgIHRyeSB7IFByb2Nlc3MuU3RhcnQoImh0dHA6Ly8iICsgSG9zdCArICI6IiArIHBvcnQgKyAiLyIpOyB9CiAgICAgICAgICAgICAgICBjYXRjaCB7IH0KICAgICAgICAgICAgfQogICAgICAgICAgICBlbHNlCiAgICAgICAgICAgIHsKICAgICAgICAgICAgICAgIExvZygi5rKh5pyJ5Y+v5omY566h55qE6aG16Z2i77yM5LiN6Ieq5Yqo5byA5rWP6KeI5Zmo44CCIik7CiAgICAgICAgICAgICAgICBMb2coIuivt+ebtOaOpeWPjOWHu+S9oOaJi+S4iueahCBjaGF0Lmh0bWwg4oCU4oCUIOeUqCBmaWxlOi8vIOaJk+W8gOS4gOagt+iDvei/nuS4iuOAgiIpOwogICAgICAgICAgICB9CiAgICAgICAgfQoKICAgICAgICB3aGlsZSAodHJ1ZSkKICAgICAgICB7CiAgICAgICAgICAgIFRjcENsaWVudCBjID0gbGlzdGVuZXIuQWNjZXB0VGNwQ2xpZW50KCk7CgogICAgICAgICAgICAvLyDlv4XpobvmnInlj5HpgIHotoXml7bjgILpu5jorqQgMCA9IOaXoOmZkOetie+8jOW+gOatu+i/nuaOpeWGmeS8muawuOi/nOaMguS9j++8jAogICAgICAgICAgICAvLyDkuIrpnaIgV3NTZW5kIOeahOazqOmHiumHjOaPj+i/sOeahOmCo+WcuuS6i+aVheWwseaYr+i/meS5iOadpeeahOOAggogICAgICAgICAgICBjLlNlbmRUaW1lb3V0ID0gMzAwMDsKICAgICAgICAgICAgYy5Ob0RlbGF5ID0gdHJ1ZTsKCiAgICAgICAgICAgIFRocmVhZCB0ID0gbmV3IFRocmVhZChIYW5kbGVDbGllbnQpOwogICAgICAgICAgICB0LklzQmFja2dyb3VuZCA9IHRydWU7CiAgICAgICAgICAgIHQuU3RhcnQoYyk7CiAgICAgICAgfQogICAgfQp9Cg==";
+
+/* 构建戳。显示在弹窗底部，用来判断"浏览器里跑的是哪一版"。
+ * 踩过的坑：磁盘上 chat.html 早就更新了，但打开的标签页还是旧代码，
+ * 结果在一个已经修好的 bug 上白排查半天。 */
+var BUILD = "2026-09-18 13:40:00 · cs:d0560e9b";
+
+/* =====================================================================
+ * 小工具
+ * ===================================================================== */
+function $(id){ return document.getElementById(id); }
+
+function b64uEncode(bytes){
+  var s = "";
+  for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+}
+function b64uDecode(str){
+  var s = str.replace(/-/g,"+").replace(/_/g,"/");
+  while (s.length % 4) s += "=";
+  var bin = atob(s), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function utf8Encode(s){ return new TextEncoder().encode(s); }
+function utf8Decode(b){ return new TextDecoder().decode(b); }
+function concatBytes(a, b){
+  var out = new Uint8Array(a.length + b.length);
+  out.set(a, 0); out.set(b, a.length);
+  return out;
+}
+function hex(bytes){
+  var s = "";
+  for (var i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16);
+  return s;
+}
+function cmpBytes(a, b){
+  var n = Math.min(a.length, b.length);
+  for (var i = 0; i < n; i++) { if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; }
+  return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+}
+
+var PREFIX_KEY = "E2E1-K.";
+var PREFIX_MSG = "E2E1-M.";
+
+/* =====================================================================
+ * 加密层：ECDH(P-256) -> HKDF-SHA256 -> AES-256-GCM
+ *   - 双向各一把独立密钥（按公钥字典序分方向），避免 nonce 撞车
+ *   - nonce 用单调递增计数器，绝不随机
+ *   - 计数器同时进 AAD；再配"只增不减"检查防重放
+ * ===================================================================== */
+var Crypto = (function(){
+  var STORE = "e2e1.identity.jwk";
+  var myPriv = null, myPub = null, myPubRaw = null;
+  var peerPubRaw = null;
+  var sendKey = null, recvKey = null;
+  var sendCtr = 0, recvCtrMax = -1;
+
+  // ---- 测试模式（假装第二端）用的状态 ----
+  // sendKey / recvKey 导入时各自只带了 encrypt / decrypt 一种用途，
+  // 而测试回路要"反过来"用它们，所以原始密钥字节也得留着。
+  var sendRaw = null, recvRaw = null, testKeys = null;
+  var peerCtr = 0;                    // 假对方自己的发送计数器
+
+  function loadIdentity(){
+    try { var j = localStorage.getItem(STORE); if (j) return JSON.parse(j); } catch (e) {}
+    return null;
+  }
+  function saveIdentity(jwk){
+    try { localStorage.setItem(STORE, JSON.stringify(jwk)); } catch (e) {}
+  }
+
+  function ensureIdentity(){
+    if (myPriv) return Promise.resolve();
+    var saved = loadIdentity();
+    if (saved) {
+      return crypto.subtle.importKey("jwk", saved.privateKey,
+                 {name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
+        .then(function(priv){
+          myPriv = priv;
+          return crypto.subtle.importKey("jwk", saved.publicKey,
+                   {name:"ECDH", namedCurve:"P-256"}, true, []);
+        })
+        .then(function(pub){
+          myPub = pub;
+          return crypto.subtle.exportKey("raw", pub);
+        })
+        .then(function(raw){ myPubRaw = new Uint8Array(raw); })
+        .catch(function(){ localStorage.removeItem(STORE); return ensureIdentity(); });
+    }
+    return crypto.subtle.generateKey({name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
+      .then(function(pair){
+        myPriv = pair.privateKey; myPub = pair.publicKey;
+        return Promise.all([
+          crypto.subtle.exportKey("jwk", pair.privateKey),
+          crypto.subtle.exportKey("jwk", pair.publicKey),
+          crypto.subtle.exportKey("raw", pair.publicKey)
+        ]);
+      })
+      .then(function(r){
+        saveIdentity({ privateKey: r[0], publicKey: r[1] });
+        myPubRaw = new Uint8Array(r[2]);
+      });
+  }
+
+  function resetIdentity(){
+    localStorage.removeItem(STORE);
+    myPriv = myPub = myPubRaw = peerPubRaw = sendKey = recvKey = null;
+    sendCtr = 0; recvCtrMax = -1;
+    sendRaw = recvRaw = null; testKeys = null; peerCtr = 0;
+    return ensureIdentity();
+  }
+
+  function setPeerPub(raw){
+    if (raw.length !== 65 || raw[0] !== 4) {
+      return Promise.reject(new Error("公钥格式不对（P-256 未压缩点应为 65 字节）"));
+    }
+    peerPubRaw = raw;
+    return crypto.subtle.importKey("raw", raw, {name:"ECDH", namedCurve:"P-256"}, false, [])
+      .then(function(peerPub){
+        return crypto.subtle.deriveBits({name:"ECDH", public: peerPub}, myPriv, 256);
+      })
+      .then(function(shared){
+        return crypto.subtle.importKey("raw", new Uint8Array(shared), "HKDF", false, ["deriveBits"]);
+      })
+      .then(function(hkdfKey){
+        var a = myPubRaw, b = peerPubRaw;
+        var first  = cmpBytes(a, b) < 0 ? a : b;
+        var second = cmpBytes(a, b) < 0 ? b : a;
+        var salt = concatBytes(first, second);
+        return crypto.subtle.deriveBits(
+          { name:"HKDF", hash:"SHA-256", salt: salt, info: utf8Encode("e2e1 v1 session keys") },
+          hkdfKey, 512);
+      })
+      .then(function(okm){
+        var k = new Uint8Array(okm);
+        var iAmFirst = cmpBytes(myPubRaw, peerPubRaw) < 0;
+        var s = iAmFirst ? k.slice(0,32) : k.slice(32,64);
+        var r = iAmFirst ? k.slice(32,64) : k.slice(0,32);
+        return Promise.all([
+          crypto.subtle.importKey("raw", s, {name:"AES-GCM"}, false, ["encrypt"]),
+          crypto.subtle.importKey("raw", r, {name:"AES-GCM"}, false, ["decrypt"])
+        ]).then(function(keys){ return { keys: keys, s: s, r: r }; });
+      })
+      .then(function(res){
+        sendKey = res.keys[0]; recvKey = res.keys[1];
+        // 原始字节必须一起带出来：s / r 是上一个 then 里的局部变量，
+        // 出了那个作用域就没了（这里踩过 ReferenceError: s is not defined）
+        sendRaw = res.s; recvRaw = res.r;
+        testKeys = null;
+        sendCtr = 0; recvCtrMax = -1; peerCtr = 0;
+      });
+  }
+
+  function ctrToIv(ctr){
+    var iv = new Uint8Array(12);
+    var v = ctr;
+    for (var i = 11; i >= 4; i--) { iv[i] = v & 0xFF; v = Math.floor(v / 256); }
+    return iv;
+  }
+  function ctrToAad(ctr){ return utf8Encode("E2E1-M|" + ctr); }
+
+  function encrypt(plaintext){
+    if (!sendKey) return Promise.reject(new Error("会话密钥未就绪"));
+    var ctr = sendCtr++;
+    var iv = ctrToIv(ctr);
+    return crypto.subtle.encrypt(
+        { name:"AES-GCM", iv: iv, additionalData: ctrToAad(ctr), tagLength: 128 },
+        sendKey, utf8Encode(plaintext))
+      .then(function(ct){
+        return PREFIX_MSG + b64uEncode(concatBytes(iv, new Uint8Array(ct)));
+      });
+  }
+
+  function decrypt(envelope){
+    if (!recvKey) return Promise.reject(new Error("会话密钥未就绪"));
+    if (envelope.indexOf(PREFIX_MSG) !== 0) return Promise.reject(new Error("不是加密消息"));
+
+    var blob = b64uDecode(envelope.slice(PREFIX_MSG.length));
+    if (blob.length < 13) return Promise.reject(new Error("密文太短"));
+    var iv = blob.slice(0, 12);
+    var ct = blob.slice(12);
+
+    var ctr = 0;
+    for (var i = 4; i < 12; i++) ctr = ctr * 256 + iv[i];
+    if (ctr <= recvCtrMax) return Promise.reject(new Error("重放或乱序的旧消息（计数 " + ctr + "）"));
+
+    return crypto.subtle.decrypt(
+        { name:"AES-GCM", iv: iv, additionalData: ctrToAad(ctr), tagLength: 128 },
+        recvKey, ct)
+      .then(function(pt){
+        recvCtrMax = ctr;
+        return utf8Decode(new Uint8Array(pt));
+      });
+  }
+
+  /* ---------------- 测试专用：扮演"对方" ----------------
+   *
+   * setPeerPub 按公钥字典序把 512 位 HKDF 输出切成两半：
+   * 字典序小的一方拿 k[0..32] 当发送键，另一方拿 k[32..64]。于是对"对方"来说：
+   *     对方的发送键 === 我的接收键 recvKey
+   *     对方的接收键 === 我的发送键 sendKey
+   * 两把钥匙都已经在本模块里，所以能在同一个页面把两个方向都真跑一遍 ——
+   * 用的是同一套 AES-GCM、同一套计数器规则，不是模拟。
+   */
+
+  /** 懒导入"反着用"的两个密钥句柄（sendKey 只导了 encrypt，recvKey 只导了 decrypt）。 */
+  function ensureTestKeys(){
+    if (testKeys) return testKeys;
+    if (!sendRaw || !recvRaw) return Promise.reject(new Error("会话密钥未就绪"));
+    testKeys = Promise.all([
+      crypto.subtle.importKey("raw", sendRaw, {name:"AES-GCM"}, false, ["decrypt"]),
+      crypto.subtle.importKey("raw", recvRaw, {name:"AES-GCM"}, false, ["encrypt"])
+    ]).then(function(k){ return { peerRecv: k[0], peerSend: k[1] }; });
+    return testKeys;
+  }
+
+  /** 以对方的身份，解开我发出去的密文（用对方的接收键 = 我的发送键）。 */
+  function testDecryptAsPeer(envelope){
+    if (envelope.indexOf(PREFIX_MSG) !== 0) return Promise.reject(new Error("不是加密消息"));
+    var blob = b64uDecode(envelope.slice(PREFIX_MSG.length));
+    if (blob.length < 13) return Promise.reject(new Error("密文太短"));
+    var iv = blob.slice(0, 12);
+    var ct = blob.slice(12);
+    var ctr = 0;
+    for (var i = 4; i < 12; i++) ctr = ctr * 256 + iv[i];
+
+    return ensureTestKeys().then(function(tk){
+      return crypto.subtle.decrypt(
+        { name:"AES-GCM", iv: iv, additionalData: ctrToAad(ctr), tagLength: 128 },
+        tk.peerRecv, ct);
+    }).then(function(pt){ return utf8Decode(new Uint8Array(pt)); });
+  }
+
+  /** 以对方的身份，发一条密文给我（用对方的发送键 = 我的接收键）。 */
+  function testEncryptAsPeer(plaintext){
+    return ensureTestKeys().then(function(tk){
+      var ctr = peerCtr++;
+      var iv = ctrToIv(ctr);
+      return crypto.subtle.encrypt(
+        { name:"AES-GCM", iv: iv, additionalData: ctrToAad(ctr), tagLength: 128 },
+        tk.peerSend, utf8Encode(plaintext)
+      ).then(function(ct){
+        return PREFIX_MSG + b64uEncode(concatBytes(iv, new Uint8Array(ct)));
+      });
+    });
+  }
+
+  function myKeyEnvelope(){ return PREFIX_KEY + b64uEncode(myPubRaw); }
+
+  return {
+    ensureIdentity: ensureIdentity,
+    resetIdentity: resetIdentity,
+    setPeerPub: setPeerPub,
+    encrypt: encrypt,
+    decrypt: decrypt,
+    testDecryptAsPeer: testDecryptAsPeer,
+    testEncryptAsPeer: testEncryptAsPeer,
+    myKeyEnvelope: myKeyEnvelope,
+    myPubRaw: function(){ return myPubRaw; },
+    peerPubRaw: function(){ return peerPubRaw; },
+    hasPeer: function(){ return peerPubRaw !== null; },
+    ready: function(){ return sendKey !== null && recvKey !== null; },
+    myFingerprint: function(){ return myPubRaw ? hex(myPubRaw.slice(1, 9)) : ""; }
+  };
+})();
+
+/* =====================================================================
+ * 桥：WebSocket 客户端
+ * ===================================================================== */
+var Bridge = (function(){
+  var WS_URL = (location.protocol === "http:" || location.protocol === "https:")
+    ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+    : "ws://127.0.0.1:8765/ws";
+
+  var ws = null, tries = 0, connected = false;
+  var onText = null, onState = null;
+
+  /**
+   * 一定要重试，而且是无限重试。
+   *
+   * 踩过的坑：第一版在"初次连接就失败"时直接 return 不重试 ——
+   * 可首次运行恰恰就是这种情况（页面先打开，桥还没装）。
+   * 结果用户装好桥之后，页面死活连不上，必须手动刷新。
+   */
+  function scheduleRetry(){
+    var delay = Math.min(600 * Math.pow(2, Math.min(tries, 4)), 8000);
+    tries++;
+    setTimeout(connect, delay);
+  }
+
+  function connect(){
+    if (onState) onState(tries === 0 ? "connecting" : "retrying");
+    try { ws = new WebSocket(WS_URL); }
+    catch (e) { scheduleRetry(); return; }
+
+    var opened = false;
+
+    ws.onopen = function(){
+      opened = true; tries = 0; connected = true;
+      if (onState) onState("connected");
+    };
+    ws.onmessage = function(ev){
+      var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "clipboard") { if (onText) onText(m.text, "clipboard"); }
+      else if (m.type === "hello") { if (onState) onState("connected", m.backend); }
+      else if (m.type === "sent") { if (onState) onState("sent", m); }
+      else if (m.type === "status") { if (onState) onState("wechat", m.wechat); }
+    };
+    ws.onerror = function(){ /* onclose 会紧跟着触发，统一在那里处理 */ };
+    ws.onclose = function(){
+      connected = false;
+      if (onState) onState(opened ? "disconnected" : "failed");
+      scheduleRetry();
+    };
+  }
+
+  function send(text){
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type:"send", text: text }));
+    return true;
+  }
+
+  return {
+    connect: connect,
+    send: send,
+    isConnected: function(){ return connected; },
+    onText: function(f){ onText = f; },
+    onState: function(f){ onState = f; }
+  };
+})();
+
+/* =====================================================================
+ * 界面
+ * ===================================================================== */
+function setStatus(t, cls){
+  $("status").textContent = t;
+  $("dot").className = "dot" + (cls ? " " + cls : "");
+}
+function clearEmpty(){
+  var e = $("log").querySelector(".empty");
+  if (e) e.remove();
+}
+function addSys(text, cls){
+  clearEmpty();
+  var d = document.createElement("div");
+  d.className = "sys" + (cls ? " " + cls : "");
+  d.textContent = text;
+  $("log").appendChild(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function addBubble(text, dir, meta){
+  clearEmpty();
+  var row = document.createElement("div");
+  row.className = "row2" + (dir === "out" ? " out" : "");
+  var b = document.createElement("div");
+  b.className = "bubble"; b.textContent = text;
+  row.appendChild(b);
+  var m = document.createElement("div");
+  m.className = "meta";
+  var t = document.createElement("span");
+  t.textContent = meta + " · " + new Date().toLocaleTimeString();
+  m.appendChild(t);
+  if (dir === "out") {
+    var lk = document.createElement("span");
+    lk.className = "lock"; lk.textContent = "🔒 已加密";
+    m.appendChild(lk);
+  }
+  row.appendChild(m);
+  $("log").appendChild(row);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+/* ---------- 弹出面板 ---------- */
+function showPop(id){
+  ["popBridge","popKey","popTest"].forEach(function(p){ $(p).classList.toggle("show", p === id); });
+}
+function hidePops(){
+  ["popBridge","popKey","popTest"].forEach(function(p){ $(p).classList.remove("show"); });
+}
+document.addEventListener("click", function(e){
+  if (e.target.closest(".pop") || e.target.closest(".pill")) return;
+  hidePops();
+});
+document.addEventListener("keydown", function(e){ if (e.key === "Escape") hidePops(); });
+Array.prototype.forEach.call(document.querySelectorAll("[data-close]"), function(b){
+  b.addEventListener("click", function(){ hidePops(); });
+});
+
+/* ---------- 顶栏状态刷新 ---------- */
+function refreshPills(){
+  var bp = $("pillBridge"), kp = $("pillKey");
+
+  if (Bridge.isConnected()) {
+    bp.textContent = "桥 已连接"; bp.className = "pill ok";
+    $("bridgeDot").className = "b on"; $("bridgeText").textContent = "已连接，可以自动收发";
+  } else {
+    bp.textContent = "桥 未安装"; bp.className = "pill bad";
+    $("bridgeDot").className = "b"; $("bridgeText").textContent = "未连接 —— 还没装，或没在运行";
+  }
+
+  var ok = Crypto.ready();
+  if (ok) {
+    kp.textContent = "密钥 已就绪"; kp.className = "pill ok";
+    $("keyDot").className = "b on"; $("keyText").textContent = "会话密钥已协商完成";
+  } else if (Crypto.hasPeer()) {
+    kp.textContent = "密钥 协商中"; kp.className = "pill busy";
+    $("keyDot").className = "b warn"; $("keyText").textContent = "正在协商…";
+  } else {
+    kp.textContent = "密钥 未就绪"; kp.className = "pill warn";
+    $("keyDot").className = "b warn"; $("keyText").textContent = "还没跟对方交换公钥";
+  }
+
+  var f = $("keyFinger");
+  if (Crypto.myPubRaw()) { f.style.display = "block"; f.textContent = "我的指纹  " + Crypto.myFingerprint(); }
+
+  $("input").disabled = !ok;
+  $("send").disabled = !ok;
+  $("input").placeholder = ok
+    ? "输入内容…（Enter 发送，Shift+Enter 换行）"
+    : "先点右上角「桥」和「密钥」";
+
+  // 没装桥时把大横幅露出来 —— 不依赖弹窗，永远在视口里
+  $("banner").classList.toggle("show", !Bridge.isConnected());
+
+  refreshTestPill();
+}
+
+/* ---------- 发送 ---------- */
+
+/* 最近几次发送的描述，按顺序排队。
+ * 桥的回执是异步回来的，用它把回执对上号，免得用户看到"发送失败"
+ * 却不知道是哪一条失败。用队列而不是单个变量 —— 测试模式下一次操作
+ * 会发两条（出站密文 + 对方的回复密文），单个变量会被覆盖导致张冠李戴。 */
+var pendingQueue = [];
+
+/**
+ * 统一的发送出口。跟旧代码的关键区别：**检查 Bridge.send 的返回值**。
+ *
+ * 踩过的坑：以前不管 WebSocket 是不是真的开着，都无条件打一句"已发出"。
+ * readyState 不是 OPEN 时 send() 会静默返回 false —— 消息一个字都没出去，
+ * 页面却报成功。表现就是"发不出去，而且不报错"，最难查。
+ */
+function sendViaBridge(text, what){
+  if (!Bridge.isConnected()) {
+    addSys("发不出去（" + what + "）：桥没连上 —— 先启动 bridge.exe", "bad");
+    beacon("send-nobridge", what);
+    return false;
+  }
+  pendingQueue.push(what);
+  if (!Bridge.send(text)) {
+    pendingQueue.pop();
+    addSys("发不出去（" + what + "）：WebSocket 没打开，一个字都没送出去", "bad");
+    beacon("send-ws-closed", what);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 测试按钮：走跟公钥**完全相同**的链路，但发一条人眼可读的明文。
+ *
+ * 为什么用明文：公钥是 E2E1-K.… 的密文串，你在微信里看到也不知道对不对。
+ * 明文测试消息一眼就能看见，于是能把故障切成两段判断 ——
+ *   微信里有这条  -> 页面→桥→微信 整条通了，问题在公钥本身
+ *   微信里没有    -> 断在中间，看下面那条回执写的是什么
+ */
+function sendTestMessage(){
+  var d = new Date();
+  var stamp = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2)
+            + ":" + ("0" + d.getSeconds()).slice(-2);
+  var fp = Crypto.myPubRaw() ? Crypto.myFingerprint() : "(密钥未就绪)";
+  var probe = "【测试】EasyTool 桥自检 " + stamp + " / " + fp;
+
+  beacon("test-send-click", "connected=" + Bridge.isConnected());
+  if (!sendViaBridge(probe, "测试消息")) return;
+
+  addSys("已把测试消息交给桥：" + probe);
+  addSys("等回执…（桥会回一条 ok，或具体是卡在哪一步）");
+}
+
+function doSend(plaintext){
+  Crypto.encrypt(plaintext).then(function(env){
+    // 测试模式下默认只在本机跑回路，不往微信灌测试消息；
+    // 想连微信一起测就勾上「出站密文同时也发到微信」。
+    var alsoWechat = !testMode || $("chkTestToWechat").checked;
+
+    if (alsoWechat && Bridge.isConnected() && sendViaBridge(env, "消息")) {
+      addBubble(plaintext, "out", "我 → 微信当前对话");
+    } else if (alsoWechat) {
+      copyText(env);
+      addBubble(plaintext, "out", "我（密文已复制，去微信粘贴）");
+      addSys("桥未连接，密文已放进剪贴板，手动 Ctrl+V 到微信即可");
+    } else {
+      addBubble(plaintext, "out", "我（测试模式，未发到微信）");
+    }
+
+    if (testMode) runLoopback(plaintext, env);
+  }).catch(function(e){
+    addSys("加密失败: " + e.message, "bad");
+  });
+}
+
+function copyText(t){
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).catch(function(){ fallbackCopy(t); });
+  } else { fallbackCopy(t); }
+}
+function fallbackCopy(t){
+  var ta = document.createElement("textarea");
+  ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+/* ---------- 收到密文 ---------- */
+function handleIncoming(text, source){
+  if (!text) return;
+
+  if (text.indexOf(PREFIX_KEY) === 0) {
+    var raw;
+    try { raw = b64uDecode(text.slice(PREFIX_KEY.length)); }
+    catch (e) { addSys("公钥解析失败", "bad"); return; }
+
+    if (Crypto.myPubRaw() && cmpBytes(raw, Crypto.myPubRaw()) === 0) {
+      addSys("这是你自己的公钥，忽略"); return;
+    }
+    Crypto.setPeerPub(raw).then(function(){
+      addSys("✓ 已收到对方公钥，会话密钥协商完成", "ok");
+      addSys("双方指纹应一致: " + Crypto.myFingerprint());
+      refreshPills();
+    }).catch(function(e){ addSys("公钥导入失败: " + e.message, "bad"); });
+    return;
+  }
+
+  if (text.indexOf(PREFIX_MSG) === 0) {
+    Crypto.decrypt(text).then(function(pt){
+      addBubble(pt, "in", source === "test" ? "🧪 测试对方" : "对方");
+    }).catch(function(e){
+      if (!Crypto.ready()) addSys("收到密文，但密钥还没建立（先点「密钥」交换公钥）", "bad");
+      else addSys("解密失败: " + e.message, "bad");
+      addBubble(text.slice(0, 60) + (text.length > 60 ? "…" : ""), "in", "无法解密");
+    });
+    return;
+  }
+
+  if (Crypto.myPubRaw() && text.length > 0 && text.length < 400) {
+    addBubble(text, "in", source === "clipboard" ? "剪贴板（未加密）" : "对方（未加密）");
+  }
+}
+
+/* ---------- 桥状态回调 ---------- */
+Bridge.onState(function(kind, arg){
+  if (kind === "connecting") { setStatus("连接桥中…", "wait"); }
+  else if (kind === "retrying") { setStatus("等桥启动…", "wait"); }
+  else if (kind === "connected") { setStatus("桥已连接", "on"); refreshPills(); }
+  else if (kind === "failed") { setStatus("桥未连接（装好后会自动连上）", ""); refreshPills(); }
+  else if (kind === "disconnected") { setStatus("桥断开，重连中…", "wait"); refreshPills(); }
+  else if (kind === "sent") {
+    var what = pendingQueue.shift() || "消息";
+    beacon("send-reply", (arg && arg.ok) + " | " + (arg && arg.detail));
+    if (arg && arg.ok === true) {
+      addSys("桥已对「" + what + "」按下 Ctrl+V + 回车（回执 ok）—— 请确认微信里真的出现了", "ok");
+    } else {
+      addSys("发不出去（" + what + "）：" + (arg && arg.detail), "bad");
+    }
+  } else if (kind === "wechat") {
+    if (arg === "not-found") addSys("桥找不到微信窗口，请先把微信主窗口打开", "bad");
+    else if (arg === "not-logged-in") addSys("微信停在登录界面，请先登录并打开一个对话", "bad");
+  }
+});
+
+Bridge.onText(function(text){ handleIncoming(text, "clipboard"); });
+
+/* =====================================================================
+ * 测试模式：假装第二端
+ *
+ * 目的：不用等第二个人，自己就能把"加密 → 传输 → 解密"整条链跑通。
+ * 做法不是模拟 —— 现场生成第二把真 ECDH 密钥当假对方，走真实的
+ * setPeerPub 协商；回路里是真 AES-GCM、真计数器、真重放检查。
+ * ===================================================================== */
+var testMode = false;
+
+function refreshTestPill(){
+  var p = $("pillTest");
+  if (!p) return;
+  var on = testMode && Crypto.ready();
+
+  p.textContent = on ? "🧪 测试 开" : (testMode ? "🧪 测试 启动中" : "🧪 测试");
+  p.className = "pill" + (on ? " ok" : (testMode ? " busy" : ""));
+
+  $("testDot").className = "b" + (on ? " on" : (testMode ? " warn" : ""));
+  if (!testMode) {
+    $("testText").textContent = "未启用";
+  } else if (!Crypto.ready()) {
+    $("testText").textContent = "协商中…";
+  } else {
+    var pp = Crypto.peerPubRaw();
+    $("testText").textContent = "已开启 · 假对方指纹 " + (pp ? hex(pp.slice(1, 9)) : "?");
+  }
+}
+
+/** 生成第二把 ECDH 密钥当假对方，喂进真实的 setPeerPub 走一遍协商。 */
+function testConnect(){
+  beacon("test-connect-click");
+  $("testText").textContent = "正在生成假对方密钥…";
+
+  crypto.subtle.generateKey({name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
+    .then(function(kp){ return crypto.subtle.exportKey("raw", kp.publicKey); })
+    .then(function(raw){ return Crypto.setPeerPub(new Uint8Array(raw)); })
+    .then(function(){
+      testMode = true;
+      var pp = Crypto.peerPubRaw();
+      addSys("🧪 测试模式已开启 —— 假对方指纹 " + (pp ? hex(pp.slice(1, 9)) : "?"), "ok");
+      addSys("现在随便发一条：页面会先用对方的钥匙解你的出站密文，再以对方身份加密一条回复回来");
+      refreshTestPill(); refreshPills();
+      beacon("test-connect-ok");
+    })
+    .catch(function(e){
+      testMode = false;
+      addSys("测试连接失败: " + e.message, "bad");
+      refreshTestPill();
+      beacon("test-connect-fail", e.message);
+    });
+}
+
+function testExit(){
+  testMode = false;
+  beacon("test-exit");
+  Crypto.resetIdentity().then(function(){
+    addSys("已退出测试模式，密钥已重置（假对方的会话密钥丢弃了）");
+    refreshTestPill(); refreshPills();
+  }).catch(function(e){ addSys("退出测试时出错: " + e.message, "bad"); });
+}
+
+/**
+ * 一问一答的回路。三步走的都是真代码路径：
+ *   1. 用对方的接收键（= 我的发送键）解我的出站密文
+ *   2. 用对方的发送键（= 我的接收键）加密一条回复
+ *   3. 把回复喂进 handleIncoming —— 跟从剪贴板收到的一模一样
+ * 中间任何一步出问题，它都会在界面上说清楚是哪一步。
+ */
+function runLoopback(plaintext, envelope){
+  var toWechat = $("chkTestToWechat").checked;
+  addSys("🧪 出站密文 " + envelope.length + " 字符: " + envelope.slice(0, 52) + "…");
+
+  Crypto.testDecryptAsPeer(envelope).then(function(seen){
+    var same = (seen === plaintext);
+    addSys("🧪 对方解出：「" + seen + "」" + (same ? "  ✓ 与原文一致" : "  ✗ 跟原文不一致！"),
+           same ? "ok" : "bad");
+    if (!same) throw new Error("对方的解密结果跟原文不一致");
+
+    var reply = "收到：" + seen;
+    addSys("🧪 对方回复：「" + reply + "」→ 用对方的发送键加密…");
+    return Crypto.testEncryptAsPeer(reply);
+  }).then(function(inEnv){
+    addSys("🧪 回复密文 " + inEnv.length + " 字符: " + inEnv.slice(0, 52) + "…");
+
+    // 把对方的回复也真发到微信 —— 微信里于是有完整的两条密文，
+    // 页面里有完整的两条明文，"过桥走真微信"这两个方向就都真的跑到了。
+    if (toWechat) {
+      if (Bridge.isConnected() && sendViaBridge(inEnv, "对方的回复密文")) {
+        addSys("🧪 回复密文已交给桥 —— 它会粘进微信当前对话");
+      } else {
+        addSys("🧪 桥没连上，回复密文只在本机（本地回路仍然成立）", "bad");
+      }
+    }
+    return handleIncoming(inEnv, "test");
+  }).catch(function(e){
+    addSys("🧪 回路中断: " + e.message, "bad");
+    beacon("loopback-fail", e.message);
+  });
+}
+
+/* ---------- 三个药丸的点击行为 ---------- */
+$("pillBridge").addEventListener("click", function(e){
+  e.stopPropagation();
+  beacon("pill-bridge-click", "open=" + $("popBridge").classList.contains("show"));
+  if ($("popBridge").classList.contains("show")) { hidePops(); return; }
+  showPop("popBridge");
+});
+
+/* 点「测试」只展开面板，不直接连 —— 免得误触把正在用的会话密钥顶掉。 */
+$("pillTest").addEventListener("click", function(e){
+  e.stopPropagation();
+  beacon("pill-test-click", "open=" + $("popTest").classList.contains("show"));
+  if ($("popTest").classList.contains("show")) { hidePops(); return; }
+  showPop("popTest");
+});
+
+/**
+ * 点「密钥」= 直接交换公钥。
+ * 桥在就直接发到微信；桥不在就复制到剪贴板，并提示去粘贴。
+ */
+$("pillKey").addEventListener("click", function(e){
+  e.stopPropagation();
+  beacon("pill-key-click");
+  if ($("popKey").classList.contains("show")) { hidePops(); return; }
+
+  var env = Crypto.myKeyEnvelope();
+  showPop("popKey");
+  if (Bridge.isConnected()) {
+    if (sendViaBridge(env, "公钥")) {
+      addSys("公钥已交给桥（指纹 " + Crypto.myFingerprint() + "），等回执…");
+    } else {
+      copyText(env);
+      addSys("改走剪贴板：公钥已复制，去微信里 Ctrl+V 即可", "ok");
+    }
+  } else {
+    copyText(env);
+    addSys("桥未连接，公钥已复制到剪贴板 —— 去微信粘贴给对面即可", "ok");
+  }
+});
+
+$("send").addEventListener("click", function(){
+  var v = $("input").value;
+  if (!v) return;
+  $("input").value = "";
+  $("input").style.height = "42px";
+  doSend(v);
+});
+$("input").addEventListener("keydown", function(e){
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("send").click(); }
+});
+$("input").addEventListener("input", function(){
+  this.style.height = "42px";
+  this.style.height = Math.min(this.scrollHeight, 140) + "px";
+});
+
+$("btnCopyKey").addEventListener("click", function(){
+  copyText(Crypto.myKeyEnvelope());
+  addSys("公钥已复制（指纹 " + Crypto.myFingerprint() + "）", "ok");
+});
+$("btnReset").addEventListener("click", function(){
+  Crypto.resetIdentity().then(function(){
+    addSys("已重置本机密钥（对方需要重新交换公钥）");
+    refreshPills();
+  });
+});
+
+/* ---------- 桥的一键下载 ---------- */
+function bridgeSource(){
+  var bin = atob(BRIDGE_B64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return utf8Decode(bytes);
+}
+
+function download(name, data){
+  var blob = new Blob([data], { type: "application/octet-stream" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+}
+
+/**
+ * 诊断探针：把页面里发生的每一步回传到本机 8766 的 /report。
+ *
+ * 故意用 8766 而不是桥的 8765：诊断接收端必须能一直开着，
+ * 而它一旦占了 8765 就会把真正的桥挤掉（页面 WS 连到假服务上）。
+ * 分端口之后，接收端常驻，桥该起就起，互不干扰。
+ *
+ * 用 1x1 图片发的，属于 no-cors 子资源 —— file:// 页面也能发，
+ * 不受 CORS 限制，连不上也只是静默失败，绝不影响主流程。
+ * 目的：用户报"点了没反应"时，服务端日志能直接告诉我卡在哪一步。
+ */
+function beacon(tag, extra){
+  try {
+    new Image().src = "http://127.0.0.1:8766/report"
+      + "?t=" + encodeURIComponent(tag)
+      + "&b=" + encodeURIComponent(BUILD)
+      + "&p=" + encodeURIComponent(location.protocol)
+      + "&x=" + encodeURIComponent(extra || "")
+      + "&r=" + Date.now();
+  } catch (e) { /* 探针失败绝不能影响主流程 */ }
+}
+
+/**
+ * 保存文件。
+ *
+ * 优先走 File System Access API 的"另存为"对话框 —— 它**不经过浏览器的下载管道**，
+ * 所以不会被危险文件类型（.bat / .cmd / .exe）拦下来挂起。
+ * 既然要的就是 .bat，那就绕开"下载"这条路，而不是改格式。
+ * 不支持、被拒、用户取消 —— 全部有明确分支和日志，不再"默默没反应"。
+ */
+function saveFile(filename, text){
+  beacon("save-start", filename);
+
+  if (!window.showSaveFilePicker) {
+    beacon("no-picker", "fallback to plain download");
+    download(filename, text);
+    return Promise.resolve("download:unsupported");
+  }
+
+  var blob = new Blob([text], { type: "application/octet-stream" });
+  return window.showSaveFilePicker({ suggestedName: filename })
+    .then(function(handle){
+      beacon("picker-opened");
+      return handle.createWritable();
+    })
+    .then(function(w){
+      return w.write(blob).then(function(){ return w.close(); });
+    })
+    .then(function(){
+      beacon("picker-saved");
+      return "saved";
+    })
+    .catch(function(e){
+      var name = (e && e.name) || "Unknown";
+      var msg = (e && e.message) || String(e);
+      beacon("picker-error", name + " | " + msg);
+      if (name === "AbortError") return "cancelled";
+      // 其它任何错误都退回普通下载，并把错误名带出去给用户看
+      download(filename, text);
+      beacon("fallback-download", name);
+      return "download:" + name;
+    });
+}
+
+/* ---------------------------------------------------------------------
+ * 极简 ZIP 打包（stored，不压缩）
+ *
+ * 为什么要打包成 zip 而不是直接下载 .bat：
+ *   Chromium 把 .bat/.cmd/.exe/.ps1 列为危险类型，下载会被挂起，
+ *   文件落成 "未确认 xxx.crdownload"，等用户点下载气泡里的「保留」。
+ *   用户没注意到 = 装不上。实测确认过这个行为。
+ *   .zip 不在黑名单里，下载正常完成；解压是 Windows 原生能力。
+ * ------------------------------------------------------------------- */
+function crc32Table(){
+  if (crc32Table.t) return crc32Table.t;
+  var t = new Uint32Array(256);
+  for (var n = 0; n < 256; n++) {
+    var c = n;
+    for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  crc32Table.t = t;
+  return t;
+}
+function crc32(bytes){
+  var t = crc32Table(), crc = 0xFFFFFFFF;
+  for (var i = 0; i < bytes.length; i++) crc = (crc >>> 8) ^ t[(crc ^ bytes[i]) & 0xFF];
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function makeZip(entries){
+  var out = [], central = [];
+  function u16(v){ return [v & 0xFF, (v >>> 8) & 0xFF]; }
+  function u32(v){ return [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF]; }
+  function push(target, arr){ for (var i = 0; i < arr.length; i++) target.push(arr[i] & 0xFF); }
+
+  entries.forEach(function(e){
+    var name = utf8Encode(e.name);
+    var crc = crc32(e.data);
+    var size = e.data.length;
+    var offset = out.length;
+
+    push(out, u32(0x04034b50));
+    push(out, u16(20));            // version needed
+    push(out, u16(0x0800));        // flags: UTF-8 filename
+    push(out, u16(0));             // method: stored
+    push(out, u16(0)); push(out, u16(0x21));   // time / date (固定值即可)
+    push(out, u32(crc));
+    push(out, u32(size)); push(out, u32(size));
+    push(out, u16(name.length)); push(out, u16(0));
+    push(out, name);
+    push(out, e.data);
+
+    push(central, u32(0x02014b50));
+    push(central, u16(20)); push(central, u16(20));
+    push(central, u16(0x0800));
+    push(central, u16(0));
+    push(central, u16(0)); push(central, u16(0x21));
+    push(central, u32(crc));
+    push(central, u32(size)); push(central, u32(size));
+    push(central, u16(name.length)); push(central, u16(0)); push(central, u16(0));
+    push(central, u16(0)); push(central, u16(0)); push(central, u32(0));
+    push(central, u32(offset));
+    push(central, name);
+  });
+
+  var cdOffset = out.length;
+  for (var i = 0; i < central.length; i++) out.push(central[i]);
+  var cdSize = out.length - cdOffset;
+
+  push(out, u32(0x06054b50));
+  push(out, u16(0)); push(out, u16(0));
+  push(out, u16(entries.length)); push(out, u16(entries.length));
+  push(out, u32(cdSize)); push(out, u32(cdOffset));
+  push(out, u16(0));
+
+  return new Uint8Array(out);
+}
+
+/**
+ * 自解压 .bat：C# 源码以 base64 内嵌（base64 字符集在 batch 里绝对安全，
+ * 不用担心 < > | & % 破坏 echo），运行时解码 -> 编译 -> 启动。
+ * 刻意全用 ASCII：.bat 里写中文会因编码问题炸掉（踩过）。
+ */
+function buildInstaller(){
+  var CHUNK = 1800;
+  var lines = [];
+  lines.push("@echo off");
+  lines.push("setlocal enabledelayedexpansion");
+  lines.push("cd /d \"%~dp0\"");
+  lines.push("echo.");
+  lines.push("echo   Minimal IM - bridge installer");
+  lines.push("echo   ------------------------------");
+  lines.push("echo.");
+  lines.push("echo   [1/3] unpacking bridge.cs ...");
+  lines.push("if exist bridge.cs.b64 del bridge.cs.b64");
+  for (var i = 0; i < BRIDGE_B64.length; i += CHUNK) {
+    var part = BRIDGE_B64.substr(i, CHUNK);
+    lines.push((i === 0 ? "> " : ">> ") + "bridge.cs.b64 echo " + part);
+  }
+  lines.push("");
+  lines.push("echo   [2/3] compiling with the C# compiler bundled in Windows ...");
+  lines.push("set CSC=C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe");
+  lines.push("if not exist \"%CSC%\" set CSC=C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe");
+  lines.push("if not exist \"%CSC%\" (");
+  lines.push("  echo   [X] csc.exe not found. .NET Framework 4.x is required.");
+  lines.push("  pause & exit /b 1");
+  lines.push(")");
+  lines.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw bridge.cs.b64) -replace '\\s',''; [IO.File]::WriteAllBytes('bridge.cs', [Convert]::FromBase64String($b))\"");
+  lines.push("if not exist bridge.cs ( echo   [X] unpack failed. & pause & exit /b 1 )");
+  lines.push("del bridge.cs.b64");
+  lines.push("\"%CSC%\" /nologo /target:exe /platform:anycpu /out:bridge.exe /r:System.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll bridge.cs");
+  lines.push("if errorlevel 1 ( echo   [X] build failed. & pause & exit /b 1 )");
+  lines.push("");
+  lines.push("echo   [3/3] starting bridge ...");
+  lines.push("echo.");
+  lines.push("echo   Bridge is running. Keep this window open.");
+  lines.push("echo   Now go back to the page - it reconnects by itself.");
+  lines.push("echo.");
+  lines.push("bridge.exe");
+  lines.push("pause");
+  return lines.join("\r\n") + "\r\n";
+}
+
+function installBridge(){
+  var bat = buildInstaller();
+  beacon("install-click", "bat=" + bat.length + " chars");
+  saveFile("install-bridge.bat", bat).then(function(how){
+    beacon("install-done", how);
+    if (how === "cancelled") { addSys("已取消保存"); return; }
+    if (how === "saved") {
+      addSys("已保存 install-bridge.bat —— 双击运行即可", "ok");
+    } else if (how === "download") {
+      addSys("已触发下载 install-bridge.bat —— 若浏览器提示「可能有害」，点「保留」", "ok");
+    } else {
+      addSys("「另存为」不可用（" + how.replace("download:", "") + "）—— 已自动打开「手动保存」兜底", "ok");
+      showPasteFallback();
+    }
+  });
+}
+
+/* ---------------------------------------------------------------------
+ * 兜底安装路径：纯文本框 + 剪贴板。
+ *
+ * 为什么必须有它（实测结论，不是猜的）：
+ *   showSaveFilePicker 在沙箱文档里必定抛
+ *     SecurityError: Sandboxed documents aren't allowed to show a file picker.
+ *   而 .bat 属于 Chromium 的危险文件类型，普通下载可能被挂成
+ *   "未确认 xxx.crdownload" 等用户点「保留」。
+ *
+ *   文本框这条路不依赖任何权限 API：选中是浏览器原生行为，
+ *   Ctrl+C / Ctrl+V 是操作系统行为。沙箱里、file:// 下、http 下都成立，
+ *   而且 .bat 内容是纯 ASCII，粘到记事本不存在编码问题。
+ * ------------------------------------------------------------------- */
+function showPasteFallback(){
+  var bat = buildInstaller();
+  beacon("paste-open", "bat=" + bat.length + " chars");
+
+  var area = $("pasteArea");
+  area.value = bat;
+  $("pasteMsg").textContent = "请按 Ctrl+C 复制（" + bat.length + " 字符）";
+  $("pasteModal").classList.add("show");
+  try { area.focus(); area.select(); } catch (e) { /* 选区失败不影响复制按钮 */ }
+
+  // 顺手试一下剪贴板 API；失败完全没关系，用户可以自己 Ctrl+C
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(bat).then(function(){
+        $("pasteMsg").textContent = "已复制到剪贴板 ✓（" + bat.length + " 字符）";
+        beacon("paste-copied");
+      }, function(e){
+        beacon("paste-copy-failed", (e && e.name) || "Unknown");
+      });
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+function closePasteFallback(){
+  $("pasteModal").classList.remove("show");
+}
+
+$("btnCopyInstall").addEventListener("click", showPasteFallback);
+$("btnTestSend").addEventListener("click", sendTestMessage);
+$("btnTestSend2").addEventListener("click", sendTestMessage);
+$("btnTestConnect").addEventListener("click", testConnect);
+$("btnTestExit").addEventListener("click", testExit);
+$("btnPasteBig").addEventListener("click", showPasteFallback);
+$("btnClosePaste").addEventListener("click", closePasteFallback);
+$("btnCopyPaste").addEventListener("click", function(){
+  var area = $("pasteArea");
+  try { area.focus(); area.select(); document.execCommand("copy");
+        $("pasteMsg").textContent = "已复制 ✓";
+        beacon("paste-copied-exec"); }
+  catch (e) { $("pasteMsg").textContent = "请手动按 Ctrl+C"; }
+});
+$("pasteArea").addEventListener("click", function(){ this.select(); });
+$("pasteModal").addEventListener("click", function(e){
+  if (e.target === this) closePasteFallback();   // 点遮罩关闭
+});
+
+$("btnDownload").addEventListener("click", installBridge);
+$("btnInstallBig").addEventListener("click", installBridge);
+$("btnShowSrc").addEventListener("click", function(){
+  saveFile("bridge.cs", bridgeSource());
+  addSys("已保存 bridge.cs（需自己用 csc.exe 编译）");
+});
+
+/* =====================================================================
+ * 启动
+ * ===================================================================== */
+console.log("极简 IM build:", BUILD);
+Array.prototype.forEach.call(document.querySelectorAll(".js-build"), function(e){
+  e.textContent = "构建 " + BUILD;
+});
+beacon("load", "build=" + BUILD);
+
+Bridge.connect();
+Crypto.ensureIdentity()
+  .then(function(){ addSys("本机密钥已生成，指纹: " + Crypto.myFingerprint()); })
+  .catch(function(e){ addSys("密钥初始化失败: " + e.message, "bad"); })
+  .then(function(){ refreshPills(); });
+</script>
+</body>
+</html>
