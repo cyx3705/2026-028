@@ -86,6 +86,12 @@ internal static class Bridge
     private static readonly Dictionary<string, long> _msgWatermark =
         new Dictionary<string, long>();
 
+    // 每个会话上一次看到的"最后消息时间"。变了才去读那个会话 ——
+    // 这样任何真实会话来了新消息都不会漏，而开销只和"真正有动静的
+    // 会话数"成正比（一般每轮 0~2 个），不用每轮把 150 多个会话走一遍。
+    private static readonly Dictionary<string, long> _sessSeen =
+        new Dictionary<string, long>();
+
     // 桥启动时刻（Unix 秒）。只有"启动之后到达"的消息才算新消息 ——
     // 这样启动时不会把页缓存里的旧消息当成新消息刷出来，
     // 也不需要预先给一百多个会话各打一次水位。
@@ -834,10 +840,9 @@ internal static class Bridge
             foreach (WxSession s in sessions)
                 if (s != null && s.UserName == _sessionId) { picks.Add(s); break; }
         }
-        else
+        else if (catchUp)
         {
-            // 不只盯最近那一个会话：同一刻公众号消息插进来就会把你要的
-            // 那条顶到第二、第三位，只看一个就会漏掉。
+            // 手动拉取：给最近有动静的几个真实会话，让用户能立刻看到东西。
             foreach (WxSession s in sessions)
             {
                 if (s == null || s.UserName == null) continue;
@@ -847,10 +852,32 @@ internal static class Bridge
                 if (picks.Count >= 3) break;
             }
         }
+        else
+        {
+            // 自动：**任何一个**真实会话的最后消息时间变了就读它。
+            // 不限定个数 —— 限定个数会漏掉同时到消息的其它会话。
+            // 首次轮询只记基线不读（否则会把页缓存里的旧消息全捞出来）。
+            bool primed = _sessSeen.Count > 0;
+            foreach (WxSession s in sessions)
+            {
+                if (s == null || s.UserName == null) continue;
+                if (IsNoiseSession(s.UserName)) continue;
+                if (s.LastTimestamp <= 0) continue;
+
+                long prev;
+                bool known = _sessSeen.TryGetValue(s.UserName, out prev);
+                _sessSeen[s.UserName] = s.LastTimestamp;
+
+                if (!primed) continue;              // 首轮只建基线
+                if (known && prev == s.LastTimestamp) continue;   // 这个会话没动静
+                picks.Add(s);
+            }
+        }
         if (picks.Count == 0)
         {
-            _lastPullNote = Stamp() + " " + why + "：没有可读的会话"
+            _lastPullNote = Stamp() + " " + why + "：没有会话有新动静"
                           + (_sessionId.Length > 0 ? "（锁定 " + _sessionId + " 不在列表里）" : "");
+            if (sessions.Count > 0) _lastReadSawSession = true;
             return null;
         }
 
@@ -1668,7 +1695,8 @@ internal static class Bridge
                         sid = Convert.ToString(sidObj).Trim();
                     _sessionId = sid;
                     _msgWatermark.Remove(sid);
-                    Log("读取会话: " + (sid.Length == 0 ? "自动（最近有动静的会话）" : sid));
+                    _sessSeen.Clear();          // 换会话就重新建一次基线
+                    Log("读取会话: " + (sid.Length == 0 ? "自动（任何有动静的会话）" : sid));
                     WsSendText(client, "{\"type\":\"session\",\"id\":\"" + JsonEscape(sid) + "\"}");
                 }
             }
@@ -1738,7 +1766,7 @@ internal static class Bridge
             ? "内存（读 SQLCipher 解密后的页缓存，不用密钥、不动鼠标）"
             : "剪贴板（拖长方形 + Ctrl+C，旧路径）"));
         Log("读取会话: " + (_sessionId.Length == 0
-            ? "自动（取最近有动静的会话）"
+            ? "自动（任何有动静的会话）"
             : _sessionId));
 
         Thread watcher = new Thread(ClipboardWatcher);
