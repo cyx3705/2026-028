@@ -45,12 +45,14 @@ function makeEl(tag){
     remove(){},
     focus(){},
     select(){},
-    click(){},
-    addEventListener(){},
+    /* 记下监听器，click() 真去调 —— 否则按钮上的逻辑在测试里根本进不去 */
+    addEventListener(type, fn){ (el._on[type] = el._on[type] || []).push(fn); },
+    click(){ (el._on.click || []).forEach(f => f.call(el)); },
     querySelector(){ return null; },
     querySelectorAll(){ return []; },
     setAttribute(){},
     getBoundingClientRect(){ return { top:0, left:0, width:100, height:20 }; },
+    _on: {},
   };
   el.classList = {
     add(c){ if (!el.classList.contains(c)) el.className = (el.className + " " + c).trim(); },
@@ -89,11 +91,16 @@ for (const [k, v] of [["navigator", { clipboard: undefined }],
 try { globalThis.navigator = globalThis.navigator; } catch (e) {}
 globalThis.alert = () => {};
 
-// WebSocket 桩：连不上也不回调，于是 Bridge 保持"未连接"且不排重试 —— 结果确定
+// WebSocket 桩：连不上也不回调，于是 Bridge 保持"未连接"且不排重试 —— 结果确定。
+// 实例收集起来（__sockets），需要时把 readyState 打开、手动喂一帧进来，
+// 这样"桥回了什么 -> 界面变成什么"这条链能在 Node 里真跑一遍。
+globalThis.__sockets = [];
 globalThis.WebSocket = function(){
   this.readyState = 0;
-  this.send = () => {};
+  this.sent = [];
+  this.send = (t) => { this.sent.push(String(t)); };
   this.close = () => {};
+  globalThis.__sockets.push(this);
 };
 globalThis.WebSocket.OPEN = 1;
 
@@ -429,6 +436,66 @@ const settle = () => new Promise(r => setTimeout(r, 60));
   P.onPulled({ ok: true, len: dumpAuto2.length, text: dumpAuto2, auto: true });
   await settle();
   check($(("log")).children.length > a3, "自动拉取：多了一条就继续处理");
+
+  // ---------- 会话选择：桥回的 tables 必须真的到界面上（踩过：被静默丢掉，
+  //            于是面板永远卡在"正在识别…"，而桥其实 1 秒就回了）----------
+  console.log("\n--- 会话选择（tables / bind）---");
+  {
+    const sock = globalThis.__sockets[globalThis.__sockets.length - 1];
+    check(!!sock, "拿到了页面用的那个 WebSocket 桩");
+    sock.readyState = 1;
+    sock.onopen();
+
+    $("btnListSessions").click();
+    check(sock.sent.some(t => t.indexOf('"tables"') >= 0),
+          "点「选择会话」会向桥要 tables", JSON.stringify(sock.sent));
+
+    const list = [
+      { table:"Msg_9e20f478899dc29eb19741386f9343c8", md5:"9e20f478899dc29eb19741386f9343c8",
+        who:"filehelper", time:1789744105, type:1, how:"表", preview:"E2E1-K.BCYeP1lW" },
+      { table:"Msg_2ba0e1d0acc5276865a36ae03e475d90", md5:"2ba0e1d0acc5276865a36ae03e475d90",
+        who:"wxid_pno349onlek322", time:1789742614, type:244813135921, how:"表", preview:"这个叫极简" },
+      { table:"Msg_72ec7dcfc3cd083be2202fb77ca20f1b", md5:"72ec7dcfc3cd083be2202fb77ca20f1b",
+        who:"21274956184@chatroom", time:1789737665, type:3, how:"页映像", preview:"[图片]" },
+    ];
+    sock.onmessage({ data: JSON.stringify({ type:"tables", list: list }) });
+
+    const rows = $("sessionList").children;
+    check(rows.length === list.length + 1, "面板里出现 3 条会话 + 1 条「自动」",
+          rows.length + " 行");
+    check(String($("sessionHint").textContent).indexOf("3") >= 0,
+          "标题写清识别到几个", String($("sessionHint").textContent));
+    // 桩 DOM 的 textContent 不会从子节点聚合，所以直接看 body 的两个子节点
+    const row1 = rows[1].children[1].children;   // [对方, 最新消息正文]
+    check(String(row1[0].textContent).indexOf("filehelper") >= 0,
+          "第一条是 filehelper", String(row1[0].textContent));
+    check(String(row1[1].textContent).indexOf("E2E1-K.") >= 0,
+          "第一条带着它的最新消息正文", String(row1[1].textContent));
+    check($("sessionPanel").hidden === false, "面板是展开的");
+
+    rows[2].click();
+    check(sock.sent.some(t => t.indexOf('"bind"') >= 0 && t.indexOf("wxid_pno349onlek322") >= 0),
+          "点一条会发 bind（带 session，桥才能按 wxid 定位）",
+          JSON.stringify(sock.sent.slice(-1)));
+
+    sock.onmessage({ data: JSON.stringify({
+      type:"bound", table:"Msg_2ba0e1d0acc5276865a36ae03e475d90", session:"wxid_pno349onlek322",
+      who:"wxid_pno349onlek322" }) });
+    check(String($("bindNow").textContent).indexOf("wxid_pno349onlek322") >= 0,
+          "bound 回执让界面显示已绑定谁", String($("bindNow").textContent));
+    check($("sessionPanel").hidden === true, "绑定后面板收起来");
+
+    // 刷新按钮：再问一次（"重新识别最新的消息"）
+    const before = sock.sent.length;
+    $("sessionPanel").hidden = false;
+    $("btnRefreshSessions").click();
+    check(sock.sent.length > before && sock.sent[sock.sent.length - 1].indexOf('"tables"') >= 0,
+          "「🔄 刷新」会重新要一遍 tables");
+
+    // autoPull 回执（同一个静默丢弃 bug 的另一个受害者）
+    sock.onmessage({ data: JSON.stringify({ type:"autoPull", on:false }) });
+    check($("chkAutoPull").checked === false, "autoPull 回执能同步到开关");
+  }
 
   console.log("");
   console.log("通过 " + pass + " / " + (pass + fail));

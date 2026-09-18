@@ -704,12 +704,18 @@ var Bridge = (function(){
     };
     ws.onmessage = function(ev){
       var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (!m || !m.type) return;
       if (m.type === "clipboard") { if (onText) onText(m.text, "clipboard"); }
       else if (m.type === "hello") { if (onState) onState("connected", m.backend); }
       else if (m.type === "sent") { if (onState) onState("sent", m); }
       else if (m.type === "status") { if (onState) onState("wechat", m.wechat); }
       else if (m.type === "pulling") { if (onState) onState("pulling"); }
       else if (m.type === "pulled") { if (onState) onState("pulled", m); }
+      /* 其余一律原样交给界面：tables / bound / autoPull / session …
+       * 这里以前只列了上面认得的几种，别的**静默丢掉** —— 于是「选择会话」
+       * 永远卡在"正在识别…"（桥其实 1 秒就回了）、自动拉取开关也同步不上。
+       * 界面那边按 kind 分发，多一种消息不该需要改这个模块。 */
+      else { if (onState) onState(m.type, m); }
     };
     ws.onerror = function(){ /* onclose 会紧跟着触发，统一在那里处理 */ };
     ws.onclose = function(){
