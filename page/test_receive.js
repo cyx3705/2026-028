@@ -138,6 +138,8 @@ eval(m[1] + `
   PREFIX_MSG: PREFIX_MSG,
   b64uEncode: b64uEncode,
   getMyKeySent: function(){ return myKeySent; },
+  sendViaBridge: sendViaBridge,
+  isMyEcho: isMyEcho,
   $: $,
 };
 `);
@@ -481,8 +483,9 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     sock.onmessage({ data: JSON.stringify({
       type:"bound", table:"Msg_2ba0e1d0acc5276865a36ae03e475d90", session:"wxid_pno349onlek322",
       who:"wxid_pno349onlek322" }) });
-    check(String($("bindNow").textContent).indexOf("wxid_pno349onlek322") >= 0,
-          "bound 回执让界面显示已绑定谁", String($("bindNow").textContent));
+    check(String($("pillBind").textContent).indexOf("wxid_pno349onlek322") >= 0,
+          "bound 回执让顶栏胶囊显示已绑定谁", String($("pillBind").textContent));
+    check($("pillBind").classList.contains("ok"), "绑定后胶囊变绿");
     check($("sessionPanel").hidden === true, "绑定后面板收起来");
 
     // 刷新按钮：再问一次（"重新识别最新的消息"）
@@ -495,6 +498,53 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     // autoPull 回执（同一个静默丢弃 bug 的另一个受害者）
     sock.onmessage({ data: JSON.stringify({ type:"autoPull", on:false }) });
     check($("chkAutoPull").checked === false, "autoPull 回执能同步到开关");
+
+    // 诊断：识别失败时要把"卡在哪一步"原样显示出来
+    $("btnDiag").click();
+    check(sock.sent[sock.sent.length - 1].indexOf('"diag"') >= 0, "「🩺 诊断」会向桥要诊断");
+    sock.onmessage({ data: JSON.stringify({
+      type:"diag", text:"微信窗口: pid=19036；严格页 1158 张；会话行 73 条" }) });
+    check($("diagBox").hidden === false, "诊断面板展开");
+    check(String($("diagBox").textContent).indexOf("会话行 73") >= 0,
+          "诊断内容原样贴在面板里", String($("diagBox").textContent));
+
+    // 一个都识别不出来时：面板报错 + 自动去要诊断
+    const sentBeforeEmpty = sock.sent.length;
+    sock.onmessage({ data: JSON.stringify({ type:"tables", list: [] }) });
+    check(String($("sessionHint").textContent).indexOf("0") >= 0, "空列表时标题显示 0 个");
+    check(sock.sent.slice(sentBeforeEmpty).some(t => t.indexOf('"diag"') >= 0),
+          "空列表时自动向桥要诊断（不用用户自己找）");
+  }
+
+  // ---------- 回声：自己发出去的密文被桥读回来时，不能再当对方发的 ----------
+  console.log("\n--- 自己发的不能认成对方发的 ---");
+  {
+    const sock2 = globalThis.__sockets[globalThis.__sockets.length - 1];
+    sock2.readyState = 1;
+    if (sock2.onopen) sock2.onopen();
+
+    const mine = "E2E1-M.2222222222222222222222222222222222222222";
+    check(P.sendViaBridge(mine, "测试") === true, "自己发一条出去（走真实发送出口）");
+    check(P.isMyEcho(mine) === true, "发出的正文被记下来了");
+
+    /** 日志里"气泡"（row2）的条数 —— 回声绝不能变成气泡 */
+    const bubbles = () => $(("log")).children.filter(c => String(c.className).indexOf("row2") === 0).length;
+
+    const b0 = bubbles();
+    P.handleIncoming(mine, "wechat-pull");
+    check(logHas("忽略（回声）"), "桥把自己发的那条读回来 -> 认出来并忽略");
+    check(bubbles() === b0, "回声不产生气泡（不能变成对方发来的）",
+          bubbles() + " vs " + b0);
+
+    // 从手机发的那条（页面没发过）必须照常收下 —— 文件传输助手的回路测试
+    // 就是靠这条路
+    const fromPhone = "E2E1-M.3333333333333333333333333333333333333333";
+    check(P.isMyEcho(fromPhone) === false, "没发过的正文不会被当回声");
+    const nBeforePhone = $(("log")).children.length;
+    P.handleIncoming(fromPhone, "wechat-pull");
+    const added = $(("log")).children.slice(nBeforePhone).map(c => String(c.textContent));
+    check(added.every(t => t.indexOf("忽略（回声）") < 0),
+          "手机发的那条不走回声分支（回路测试不受影响）", JSON.stringify(added));
   }
 
   console.log("");

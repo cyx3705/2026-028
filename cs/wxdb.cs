@@ -603,6 +603,10 @@ namespace LocalChat
         public long CreateTime;
         public long LocalType;
         public long Sender;
+        public long Status;
+        public long ServerSeq;
+        /// <summary>1 = 本机发出的（我们自己在微信里发的那条），2 = 从服务器收到的。</summary>
+        public long OriginSource;
         public string Text;
         public bool FromMe;
         public bool Compressed;
@@ -1249,6 +1253,9 @@ namespace LocalChat
             m.LocalType = AsLong(v[2]);
             m.Sender = AsLong(v[4]);
             m.CreateTime = AsLong(v[5]);
+            m.Status = AsLong(v[6]);
+            m.ServerSeq = AsLong(v[9]);
+            m.OriginSource = AsLong(v[10]);
             if (v[12] is string) m.Text = (string)v[12];
             else if (v[12] is byte[])
             {
@@ -1429,6 +1436,48 @@ namespace LocalChat
             note = string.Format("新根页 最大rowid={0}，按页号 {1} 页、按映像 {2} 页",
                                  lastCellKey, byPage, byImage);
             return outl;
+        }
+
+        /// <summary>诊断用：这几个数字能一眼看出"哪一步断了"。</summary>
+        public string Diagnostics()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("内存 ").Append(Note).Append("；库 ").Append(Dbs.Count).Append(" 个");
+            MemPageIndex ix = PageIndex;
+            if (ix == null)
+                sb.Append("；严格页索引：没建起来");
+            else
+                sb.Append("；严格页 ").Append(ix.Scanned).Append(" 张（内部页 ")
+                  .Append(ix.Interiors.Count).Append("、表叶子 ").Append(ix.Leaves.Count)
+                  .Append("）");
+            sb.Append("；消息表 ").Append(MessageTables().Count).Append(" 张");
+            List<WxSession> ss = Sessions();
+            sb.Append("；会话行 ").Append(ss.Count).Append(" 条");
+            sb.Append("；").Append(PageShapeCheck());
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 页 1 里写着页大小和保留区，跟我们写死的 4096 / 80 核一下 ——
+        /// 微信换版本改了这两样，下面的页解析就全错，这里要能立刻看出来。
+        /// </summary>
+        public string PageShapeCheck()
+        {
+            foreach (WxDb db in Dbs)
+            {
+                int o;
+                if (!db.PageOff.TryGetValue(1, out o)) continue;
+                byte[] d = Img.Data;
+                int ps = (d[o + 16] << 8) | d[o + 17];
+                if (ps == 0) ps = 65536;
+                int rs = d[o + 20];
+                int want = WxDb.PageSize - WxDb.Usable;
+                bool ok = (ps == WxDb.PageSize && rs == want);
+                return string.Format("页大小 {0}（写死 {1}）、保留 {2}（写死 {3}）{4}",
+                                     ps, WxDb.PageSize, rs, want,
+                                     ok ? " OK" : " ← 对不上，微信可能换版本了");
+            }
+            return "页 1 不在页缓存里，页格式核不了";
         }
 
         private static void AddRows(string table, List<SqlRow> rows,

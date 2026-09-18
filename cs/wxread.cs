@@ -503,6 +503,29 @@ internal static class WxReadMain
             }
 
             // match -- 会话行算出来的表名对不对得上真实存在的 Msg_ 表
+            // chain <会话id> [前向页数] [后向页数] -- 不依赖根页：
+            // 用会话行的 last_msg_locald_id 当锚点，去内存页映像里认页再顺着
+            // rowid 串下去。用来核对"自己发的 / 对方发的"这些标志位。
+            if (mode == "chain" && args.Length > 1)
+            {
+                long anchor = 0, last = 0;
+                foreach (WxSession s in snap.Sessions())
+                    if (s.UserName == args[1]) { anchor = s.LastMsgLocalId; last = s.LastTimestamp; break; }
+                w.WriteLine("会话 {0}: 会话行 last_msg_locald_id={1} last_timestamp={2}",
+                            args[1], anchor, Time(last));
+                string how;
+                List<WxMessage> ms = snap.LeafChain("Msg_" + WxSnapshot.Md5Hex(args[1]),
+                                                    anchor,
+                                                    args.Length > 2 ? int.Parse(args[2]) : 3,
+                                                    args.Length > 3 ? int.Parse(args[3]) : 1,
+                                                    out how);
+                w.WriteLine("LeafChain: {0} 行={1}", how, ms.Count);
+                foreach (WxMessage m in ms)
+                    w.WriteLine("   id={0,-7} {1} type={2,-4} sender={3,-5} org={4} st={5} seq={6} {7}",
+                                m.LocalId, Time(m.CreateTime), m.LocalType, m.Sender,
+                                m.OriginSource, m.Status, m.ServerSeq, Clip(m.Text, 60));
+            }
+
             if (mode == "match")
             {
                 HashSet<string> tabs = new HashSet<string>(snap.MessageTables());
@@ -531,9 +554,10 @@ internal static class WxReadMain
                 for (int i = 0; i < ms.Count; i++)
                 {
                     WxMessage m = ms[i];
-                    w.WriteLine("[{0}] id={1,-7} type={2,-4} sender={3,-5} {4}",
+                    w.WriteLine("[{0}] id={1,-7} type={2,-4} sender={3,-5} org={4} st={5} seq={6} {7}",
                                 Time(m.CreateTime), m.LocalId, m.LocalType,
-                                m.Sender, Clip(m.Text, 140));
+                                m.Sender, m.OriginSource, m.Status, m.ServerSeq,
+                                Clip(m.Text, 140));
                 }
             }
             if (mode == "tables")

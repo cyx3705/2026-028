@@ -865,6 +865,7 @@ internal static class Bridge
 
         List<PullItem> take = new List<PullItem>();
         List<string> hits = new List<string>();
+        int mineSkipped = 0;
         int readable = 0;
         for (int ti = 0; ti < tables.Count; ti++)
         {
@@ -892,7 +893,16 @@ internal static class Bridge
             long mark;
             _msgWatermark.TryGetValue(tbl, out mark);
             long maxId = mark;
-            int got = 0;
+            int got = 0, skippedMine = 0;
+
+            // 绑定之后，"我自己发的"就不再当成收到的消息了。否则页面刚发出去
+            // 的密文会被自己读回来、当成对方发来的，E2E 那层就会出怪事。
+            // 判据只取 origin_source==1（= 本机发出的这条）：不按
+            // "sender == 我的 id" 判，因为从手机发的消息也带着我的 id，
+            // 那条是对方视角的"对面发的"，得留着（文件传输助手的回路测试
+            // 就是靠它）。
+            bool skipMine = _msgTable.Length > 0 || _sessionId.Length > 0;
+
             for (int i = 0; i < tail.Count; i++)      // 行序 = rowid 升序
             {
                 WxMessage m = tail[i];
@@ -902,6 +912,11 @@ internal static class Bridge
                     if (m.LocalId <= mark) continue;
                     if (m.CreateTime < _startedAt) continue;
                 }
+                if (skipMine && m.OriginSource == 1)
+                {
+                    skippedMine++;
+                    continue;
+                }
                 PullItem it = new PullItem();
                 it.Msg = m;
                 it.Who = tbl.Substring(4, 8);
@@ -910,13 +925,16 @@ internal static class Bridge
             }
             _msgWatermark[tbl] = maxId;
             if (got > 0) hits.Add(tbl.Substring(4, 8) + "×" + got);
+            if (skippedMine > 0) mineSkipped += skippedMine;
         }
         _lastReadSawSession = readable > 0;
         fresh = take.Count;
         if (fresh == 0)
         {
             _lastPullNote = Stamp() + " " + why + "：没有新消息（可读消息表 "
-                          + readable + "/" + tables.Count + "）";
+                          + readable + "/" + tables.Count
+                          + (mineSkipped > 0 ? "，跳过自己发的 " + mineSkipped + " 条" : "")
+                          + "）";
             return null;
         }
 
@@ -946,6 +964,64 @@ internal static class Bridge
         }
         _lastPullNote = Stamp() + " " + why + "拉取：拿到 " + take.Count + " 条"
                       + "（" + string.Join("、", hits.ToArray()) + "）";
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// 诊断：一步一步说清"读到了什么、卡在哪一步"。
+    /// 别人的机器上识别失败时，这段字就是唯一能拿到的现场 —— 页面要能显示它。
+    /// </summary>
+    private static string DiagText()
+    {
+        StringBuilder sb = new StringBuilder();
+        try
+        {
+            EnsureWeChat();
+            sb.Append("微信窗口: ");
+            sb.Append(_wechatPid == 0 ? "没找到（微信没开 / 窗口类名变了）"
+                                      : "pid=" + _wechatPid);
+            if (_wechatPid != 0)
+            {
+                // 版本号要写进诊断：两边"版本一致"这个前提得能被核对
+                try
+                {
+                    Process wp = Process.GetProcessById((int)_wechatPid);
+                    sb.Append("（").Append(wp.MainModule.FileVersionInfo.FileVersion)
+                      .Append("）");
+                }
+                catch (Exception vex) { sb.Append("（版本读不到: ").Append(vex.Message).Append("）"); }
+            }
+            sb.Append("；读取方式: ").Append(_readMode);
+            sb.Append("；绑定: ").Append(_msgTable.Length > 0 ? _msgTable
+                        : (_sessionId.Length > 0 ? _sessionId : "自动"));
+            sb.Append("；上次拉取: ").Append(_lastPullNote);
+            if (_wechatPid != 0 && _readMode == "mem")
+            {
+                WxSnapshot snap = WxSnapshot.CaptureAuto(_wechatPid);
+                sb.Append("\r\n").Append(snap.Diagnostics());
+                List<string> mt = snap.MessageTables();
+                sb.Append("\r\n消息表可读情况: ");
+                int readable = 0;
+                for (int i = 0; i < mt.Count; i++)
+                {
+                    string note;
+                    if (snap.TableTail(mt[i], 1, out note).Count > 0) readable++;
+                }
+                sb.Append(readable).Append("/").Append(mt.Count)
+                  .Append(" 张表能读到行");
+                WxSession mine = null;
+                foreach (WxSession s in snap.Sessions())
+                    if (s.UserName == _sessionId) { mine = s; break; }
+                if (mine != null)
+                    sb.Append("\r\n绑定会话的会话行: last=").Append(mine.LastTimestamp)
+                      .Append(" locald_id=").Append(mine.LastMsgLocalId)
+                      .Append(" 摘要=").Append(mine.Summary);
+            }
+        }
+        catch (Exception ex)
+        {
+            sb.Append("\r\n诊断自己出错了: ").Append(ex.Message);
+        }
         return sb.ToString();
     }
 
@@ -1826,6 +1902,12 @@ internal static class Bridge
                                      + JsonEscape(sid) + "\",\"table\":\""
                                      + JsonEscape(tbl) + "\",\"who\":\""
                                      + JsonEscape(sid) + "\"}");
+                }
+                else if (type == "diag")
+                {
+                    string dtxt = DiagText();
+                    Log("诊断: " + dtxt.Replace("\r\n", " | "));
+                    WsSendText(client, "{\"type\":\"diag\",\"text\":\"" + JsonEscape(dtxt) + "\"}");
                 }
                 else if (type == "tables")
                 {

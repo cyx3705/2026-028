@@ -162,6 +162,7 @@
   <span id="status">初始化…</span>
   <span class="spacer"></span>
   <button class="pill bad" id="pillBridge">桥 未连接</button>
+  <button class="pill" id="pillBind">🔗 自动</button>
   <button class="pill warn" id="pillKey">密钥 未就绪</button>
   <button class="pill" id="pillTest">🧪 测试</button>
 
@@ -235,8 +236,15 @@
 
   <div class="row" style="flex-wrap:wrap;gap:6px">
     <button class="act" id="btnListSessions">🔗 选择会话</button>
-    <span class="fine" id="bindNow" style="color:var(--dim)">未绑定（自动读任何有动静的对话）</span>
+    <button class="act ghost" id="btnDiag">🩺 诊断</button>
   </div>
+
+  <!-- 诊断输出：识别失败时把"卡在哪一步"原样贴出来 -->
+  <pre id="diagBox" hidden
+       style="margin:8px 0 0;padding:8px 10px;border:1px solid var(--line);
+              border-radius:10px;background:rgba(0,0,0,.25);white-space:pre-wrap;
+              word-break:break-all;font-size:12px;line-height:1.5;max-height:220px;
+              overflow:auto"></pre>
 
   <!-- 会话选择：弹出最近有动静的那几个对话，每条用"它的最新一条消息"当身份 -->
   <div id="sessionPanel" hidden
@@ -771,6 +779,13 @@ var Bridge = (function(){
     return true;
   }
 
+  /** 问桥要一段诊断：读到什么、卡在哪一步。识别失败时把它原样给用户看。 */
+  function diag(){
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type:"diag" }));
+    return true;
+  }
+
   return {
     connect: connect,
     send: send,
@@ -778,6 +793,7 @@ var Bridge = (function(){
     setAutoPull: setAutoPull,
     listSessions: listSessions,
     bind: bind,
+    diag: diag,
     isConnected: function(){ return connected; },
     onText: function(f){ onText = f; },
     onState: function(f){ onState = f; }
@@ -898,6 +914,22 @@ var pullingUntil = 0;
 
 /* 桥当前绑定的会话表名（"" = 自动）。用来在会话列表里标出正在读的那一个。 */
 var boundTable = "";
+var boundWho = "";
+
+/** 顶栏那颗"绑定"胶囊：自动 / 已绑定谁。 */
+function refreshBindPill(){
+  var p = $("pillBind");
+  if (!p) return;
+  if (boundTable || boundWho) {
+    p.textContent = "🔗 " + (boundWho || boundTable).slice(0, 22);
+    p.className = "pill ok";
+    p.title = "只读这一个会话：" + (boundWho || "") + " " + (boundTable || "");
+  } else {
+    p.textContent = "🔗 自动";
+    p.className = "pill";
+    p.title = "任何有动静的会话都读（点「选择会话」可以绑定一个）";
+  }
+}
 
 /* 我有没有把公钥发出去过。
  * 用它把"点了密钥但还没等到对方"这件事说出来 —— 否则用户点完看药丸还是黄的，
@@ -924,7 +956,36 @@ function sendViaBridge(text, what){
     beacon("send-ws-closed", what);
     return false;
   }
+  rememberMySend(text);
   return true;
+}
+
+/* ---------------------------------------------------------------------
+ * 自己发出去的东西，要认得出来
+ *
+ * 桥是从微信数据库里读消息的 —— 那里既有对方发的，也有**我自己发的**。
+ * 自己发的那条要是被当成"收到的"，页面就会拿自己写的密文去解密、去推进
+ * 对方的计数器，E2E 那层会出一串看不懂的怪事。发出去的时候记一笔，
+ * 读回来一模一样就丢掉（只留最近 20 条，够覆盖一轮来回）。
+ * ------------------------------------------------------------------- */
+var mySentBodies = [];
+var MY_SENT_KEEP = 20;
+
+function rememberMySend(text){
+  if (!text) return;
+  var b = String(text).trim();
+  if (!b || isMyEcho(b)) return;
+  mySentBodies.push(b);
+  while (mySentBodies.length > MY_SENT_KEEP) mySentBodies.shift();
+}
+
+function isMyEcho(text){
+  var b = String(text || "").trim();
+  if (!b) return false;
+  for (var i = 0; i < mySentBodies.length; i++) {
+    if (mySentBodies[i] === b) return true;
+  }
+  return false;
 }
 
 /**
@@ -1043,6 +1104,13 @@ function handleIncoming(text, source){
 }
 
 function handleOne(text, source){
+  // 回声：这一条就是我刚发出去的。桥把微信里的消息读回来时，里面必然有
+  // 我自己发的那条 —— 不认出来，页面就会拿自己写的密文当对方的消息处理。
+  if (isMyEcho(text)) {
+    addSys("这一条是我自己刚发出去的，忽略（回声）");
+    beacon("my-echo-skipped", "len=" + String(text).length);
+    return;
+  }
   if (text.indexOf(PREFIX_KEY) === 0) {
     var raw;
     try { raw = b64uDecode(text.slice(PREFIX_KEY.length)); }
@@ -1102,12 +1170,21 @@ Bridge.onState(function(kind, arg){
   else if (kind === "tables") { onTables(arg && arg.list ? arg.list : []); }
   else if (kind === "bound") {
     var bt = arg && arg.table ? arg.table : "";
+    var bw = arg && arg.who ? arg.who : (arg && arg.session ? arg.session : "");
     boundTable = bt;
-    var tg = $("bindNow");
-    if (tg) tg.textContent = bt ? ("已绑定 " + (arg.who || bt)) : "未绑定（自动读任何有动静的对话）";
+    boundWho = bw;
+    refreshBindPill();
     if (bt) { var sp = $("sessionPanel"); if (sp) sp.hidden = true; }
-    addSys(bt ? "桥已绑定会话 " + bt + "（只读这一个）"
+    addSys(bt ? "桥已绑定会话 " + (bw || bt) + "（只读这一个，自己发的不再当收到的）"
               : "桥已解绑，回到自动模式（任何有动静的会话都读）", "ok");
+  }
+  else if (kind === "diag") {
+    var box = $("diagBox");
+    if (box) {
+      box.hidden = false;
+      box.textContent = (arg && arg.text) ? arg.text : "（桥没给内容）";
+    }
+    beacon("diag-shown", "len=" + ((arg && arg.text) ? arg.text.length : 0));
   }
   else if (kind === "autoPull") {
     // 桥确认了开关状态，把界面同步过去（比如桥重启后回到默认开启）。
@@ -1588,9 +1665,14 @@ function onTables(list){
   if (!box) return;
   box.innerHTML = "";
   if (!list.length) {
-    addSys("桥现在一个对话都识别不出来 —— 先在微信里打开那个对话（微信要把它的页读进缓存），再点一次「🔄 刷新」", "bad");
+    addSys("桥现在一个对话都识别不出来。已经把现场抓出来贴在下面，看「诊断」里卡在哪一步", "bad");
     $("sessionHint").textContent = "0 个";
+    if (!Bridge.diag()) addSys("诊断请求没发出去", "bad");
     return;
+  }
+  if (list.length < 3) {
+    addSys("只识别出 " + list.length + " 个（要 3–5 个）—— 把「🩺 诊断」的内容发我看", "bad");
+    Bridge.diag();
   }
 
   // 最上面一条恒为"解绑"：回到"任何有动静的都读"
@@ -1657,6 +1739,24 @@ $("btnRefreshSessions").addEventListener("click", function(){
 
 $("btnCloseSessions").addEventListener("click", function(){
   $("sessionPanel").hidden = true;
+});
+
+$("btnDiag").addEventListener("click", function(){
+  beacon("diag-click");
+  var box = $("diagBox");
+  if (box) { box.hidden = false; box.textContent = "正在问桥要诊断…"; }
+  if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
+  if (!Bridge.diag()) addSys("诊断请求没发出去", "bad");
+});
+$("pillBind").addEventListener("click", function(){
+  beacon("pill-bind-click");
+  if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
+  if (boundTable || boundWho) {
+    if (Bridge.bind("", "")) addSys("正在解绑…");
+  } else {
+    $("sessionPanel").hidden = false;
+    if (!Bridge.listSessions()) addSys("请求没发出去", "bad");
+  }
 });
 
 $("btnPull").addEventListener("click", pullRecent);
@@ -1992,6 +2092,7 @@ Array.prototype.forEach.call(document.querySelectorAll(".js-build"), function(e)
 beacon("load", "build=" + BUILD);
 
 Bridge.connect();
+refreshBindPill();
 Crypto.ensureIdentity()
   .then(function(){ addSys("本机密钥已生成，指纹: " + Crypto.myFingerprint()); })
   .catch(function(e){ addSys("密钥初始化失败: " + e.message, "bad"); })
