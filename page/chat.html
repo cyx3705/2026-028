@@ -226,12 +226,26 @@
     </label>
   </div>
   <p class="fine">
-    桥会自动切到微信 → 沿<strong>右侧头像列拖一个细长方形</strong> → <code>Ctrl+C</code> 复制回来。
+    桥直接从微信进程内存里读 <strong>SQLCipher 解密后的页</strong>：
+    不用密钥、不动鼠标、不占剪贴板、不改焦点。
     <strong>中文原样显示，密文自动解密</strong>，取最近 5 条。
-    <br>勾上「自动拉取」后，**微信因新消息自己切到前台**时桥会自动拉一次：
-    光标会放回原处、你的剪贴板内容也会被还原，所以不打断你手上的活。
-    <br><span style="color:var(--dim)">仍然只拉当前对话里<strong>看得见</strong>的消息；
-    拖的必须是长方形，一条线微信不认（会读到上一次的旧剪贴板）。</span>
+    <br><span style="color:var(--dim)">看得到的是<strong>页缓存里还有的页</strong>，
+    所以它的正确用法是"消息一到就去读" —— 刚写入的页必然还在缓存里。</span>
+  </p>
+
+  <div class="row" style="flex-wrap:wrap;gap:6px">
+    <button class="act" id="btnListSessions">🔗 选择会话</button>
+    <select id="selSession" style="min-width:230px;max-width:100%;padding:5px 6px">
+      <option value="">（自动：任何有动静的会话都读）</option>
+    </select>
+    <button class="act" id="btnBind">绑定</button>
+  </div>
+  <p class="fine">
+    和某个人一直聊不通、或者想盯死一个对话时：点「选择会话」列出桥现在能读到的对话，
+    挑一个再点「绑定」。绑定后<strong>只读那一个对话</strong>。
+    <br><span style="color:var(--dim)">列表来自消息库里的 <code>Msg_&lt;md5&gt;</code> 表，
+    刻意不依赖 <code>session.db</code> —— 会话表实测只读得出一部分
+    （153 个里只有 53 个），那正是以前"朋友的对话识别不到"的原因。</span>
   </p>
 
   <hr style="border:0;border-top:1px solid var(--line);margin:13px 0 11px">
@@ -363,7 +377,7 @@ var BRIDGE_B64 = "Ly8gYnJpZGdlLmNzIC0tIFdlQ2hhdCBjbGlwYm9hcmQgYnJpZGdlLgovLwovLy
 /* 构建戳。显示在弹窗底部，用来判断"浏览器里跑的是哪一版"。
  * 踩过的坑：磁盘上 chat.html 早就更新了，但打开的标签页还是旧代码，
  * 结果在一个已经修好的 bug 上白排查半天。 */
-var BUILD = "2026-09-18 22:26:14 · cs:58a8e105";
+var BUILD = "2026-09-18 22:27:05 · cs:58a8e105";
 
 /* =====================================================================
  * 小工具
@@ -722,11 +736,27 @@ var Bridge = (function(){
     return true;
   }
 
+  /** 问桥要"页缓存里现在读得到的会话"列表（带最新一条预览）。 */
+  function listSessions(){
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type:"tables" }));
+    return true;
+  }
+
+  /** 绑定要读的会话。table 为空串 = 解绑，回到"任何有动静的都读"。 */
+  function bind(table){
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type:"bind", table: table || "" }));
+    return true;
+  }
+
   return {
     connect: connect,
     send: send,
     pull: pull,
     setAutoPull: setAutoPull,
+    listSessions: listSessions,
+    bind: bind,
     isConnected: function(){ return connected; },
     onText: function(f){ onText = f; },
     onState: function(f){ onState = f; }
@@ -1045,6 +1075,12 @@ Bridge.onState(function(kind, arg){
   }
   else if (kind === "pulling") { setStatus("正在从微信拉取…", "wait"); }
   else if (kind === "pulled") { onPulled(arg); }
+  else if (kind === "tables") { onTables(arg && arg.list ? arg.list : []); }
+  else if (kind === "bound") {
+    var bt = arg && arg.table ? arg.table : "";
+    addSys(bt ? "桥已绑定会话 " + bt + "（只读这一个）"
+              : "桥已解绑，回到自动模式（任何有动静的会话都读）", "ok");
+  }
   else if (kind === "autoPull") {
     // 桥确认了开关状态，把界面同步过去（比如桥重启后回到默认开启）。
     var box = $("chkAutoPull");
@@ -1495,6 +1531,57 @@ function pullRecent(){
     addSys("拉取失败：WebSocket 没打开", "bad");
   }
 }
+
+/**
+ * 桥报回来的"现在能读到的会话"列表。填进下拉框，由人挑一个绑定。
+ *
+ * 列表来自消息库里每张 Msg_<md5> 表的最右叶子（新行必在最右边），
+ * 刻意不依赖 session.db —— 会话表只缓存得到一部分，实测 153 个会话里
+ * 只读得出 53 个，而"读不出来的那个对话"正是以前识别不到的那个。
+ */
+function onTables(list){
+  var sel = $("selSession");
+  if (!sel) return;
+  var keep = sel.value;
+  sel.innerHTML = "";
+  var auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "（自动：任何有动静的会话都读）";
+  sel.appendChild(auto);
+
+  for (var i = 0; i < list.length; i++) {
+    var it = list[i];
+    var o = document.createElement("option");
+    o.value = it.table;
+    var when = "";
+    try { when = new Date(it.time * 1000).toLocaleString(); } catch (e) {}
+    o.textContent = (it.preview || "（无文本）") + "  ·  " + when
+                  + "  ·  " + String(it.md5 || "").slice(0, 8);
+    sel.appendChild(o);
+  }
+  if (keep) sel.value = keep;
+
+  if (!list.length) {
+    addSys("桥现在一个会话都读不到 —— 先在微信里打开那个对话（微信要把它的页读进缓存），再回来点一次", "bad");
+  } else {
+    addSys("桥现在能读到 " + list.length + " 个会话，挑一个再点「绑定」", "ok");
+  }
+  beacon("tables-ok", "n=" + list.length);
+}
+
+$("btnListSessions").addEventListener("click", function(){
+  beacon("list-sessions-click");
+  if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
+  addSys("正在问桥要可读的会话列表（要抓一次内存快照，约 0.5 秒）…");
+  if (!Bridge.listSessions()) addSys("请求没发出去：WebSocket 没打开", "bad");
+});
+
+$("btnBind").addEventListener("click", function(){
+  var v = $("selSession").value;
+  beacon("bind-click", "t=" + v);
+  if (!Bridge.isConnected()) { addSys("桥没连上", "bad"); return; }
+  if (!Bridge.bind(v)) { addSys("绑定请求没发出去", "bad"); return; }
+});
 
 $("btnPull").addEventListener("click", pullRecent);
 
