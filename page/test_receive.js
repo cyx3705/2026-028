@@ -267,7 +267,7 @@ const settle = () => new Promise(r => setTimeout(r, 60));
   check(logHas("内容是空的"), "手动收下：空内容有提示");
 
   check(P.recvManual("你好呀", "测试") === false, "手动收下：不是加密消息被拒");
-  check(logHas("不像一条加密消息"), "手动收下：非加密内容有提示");
+  check(logHas("不像加密消息"), "手动收下：非加密内容有提示");
 
   check(P.recvManual(env3, "测试") === true, "手动收下：合法公钥信封被接受");
   await settle();
@@ -305,6 +305,33 @@ const settle = () => new Promise(r => setTimeout(r, 60));
   check(P.recvManual(envMsg, "测试") === true, "手动收下：密文信封被接受");
   await settle();
   check($(("log")).children.length > nBubbles, "手动收下密文 → 日志里多出一条气泡");
+
+  // ---------- 整块多行（微信里多选消息后一次复制）----------
+  P.Crypto.clearPeer();
+  P.refreshPills();
+
+  const kp5 = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const raw5 = new Uint8Array(await crypto.subtle.exportKey("raw", kp5.publicKey));
+  const envKey5 = P.PREFIX_KEY + P.b64uEncode(raw5);
+
+  const batch1 = ["这是一条没加密的普通消息", "我: " + envKey5].join("\n");
+  check(P.recvManual(batch1, "多行") === true, "整块多行：被接受");
+  await settle();
+  check(pillKey().textContent === "密钥 已就绪",
+        "整块多行：里面的公钥被摘出来并生效", pillKey().textContent);
+  check(logHas("从整块剪贴板里解析出"), "整块多行：日志报告解析出几条");
+
+  const envMsg5 = await P.Crypto.testEncryptAsPeer("多行里的密文");
+  const before5 = $(("log")).children.length;
+  P.recvManual("张三: 你好\n我: " + envMsg5, "多行");
+  await settle();
+  check($(("log")).children.length > before5,
+        "整块多行：密文行被解密并产生气泡");
+
+  P.recvManual("随便一句\n又一句", "多行");
+  await settle();
+  check(logHas("从整块剪贴板里解析出"), "整块多行：纯中文多行也逐条显示");
 
   console.log("");
   console.log("通过 " + pass + " / " + (pass + fail));

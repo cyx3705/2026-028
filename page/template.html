@@ -884,9 +884,63 @@ function fallbackCopy(t){
 }
 
 /* ---------- 收到密文 ---------- */
+
+/**
+ * 入站总入口。
+ *
+ * 桥推过来（或你从粘贴框喂进来）的可能是两种东西：
+ *   1. 一条消息本身 —— 最常见
+ *   2. **在微信里多选若干条消息、一次复制**得到的整块文本 —— 那是多行的
+ *
+ * 第 2 种必须拆开逐条处理，否则整块会被当成"一条看不懂的消息"。
+ * 这也是"一次把最近几条拉回来"唯一走得通的路：微信没有"全选消息"
+ * 快捷键（实测 8 种挪焦点的办法 + 鼠标点消息区，剪贴板都零变化），
+ * 但鼠标拖选几条再按一次 Ctrl+C 是可以的。
+ */
 function handleIncoming(text, source){
   if (!text) return;
+  var whole = String(text).trim();
 
+  // 整块就是一个信封：直接走单条路径
+  if (whole.indexOf(PREFIX_KEY) === 0 || whole.indexOf(PREFIX_MSG) === 0) {
+    handleOne(whole, source);
+    return;
+  }
+
+  // 多行：微信多选复制出来的整块文本
+  var lines = whole.split(/\r?\n/);
+  if (lines.length > 1) {
+    var n = 0, skipped = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i].trim();
+      if (!ln) continue;
+
+      // 多选复制常带"发送者: 内容"之类的前缀，从信封起点截断
+      var atK = ln.indexOf(PREFIX_KEY), atM = ln.indexOf(PREFIX_MSG);
+      var at = (atK >= 0 && atM >= 0) ? Math.min(atK, atM) : Math.max(atK, atM);
+
+      if (at >= 0) {
+        handleOne(ln.slice(at), source);
+        n++;
+      } else if (ln.length <= 500) {
+        addBubble(ln, "in", "剪贴板");
+        n++;
+      } else {
+        skipped++;
+      }
+    }
+    if (n > 0) {
+      addSys("从整块剪贴板里解析出 " + n + " 条消息"
+             + (skipped ? "（跳过 " + skipped + " 条过长的）" : ""));
+      beacon("recv-batch", "n=" + n + " lines=" + lines.length);
+      return;
+    }
+  }
+
+  handleOne(whole, source);
+}
+
+function handleOne(text, source){
   if (text.indexOf(PREFIX_KEY) === 0) {
     var raw;
     try { raw = b64uDecode(text.slice(PREFIX_KEY.length)); }
@@ -1197,18 +1251,23 @@ function recvManual(text, how){
   var t = String(text == null ? "" : text).trim();
   if (!t) { addSys("收下失败（" + how + "）：内容是空的", "bad"); return false; }
 
-  // 信封里绝不含空白字符；从微信/记事本粘过来容易带换行和空格，先清掉
-  if (t.indexOf("E2E1-") === 0) t = t.replace(/\s+/g, "");
+  var single = (t.indexOf(PREFIX_KEY) === 0 || t.indexOf(PREFIX_MSG) === 0);
+  var batch  = (t.indexOf("\n") >= 0);
 
-  if (t.indexOf(PREFIX_KEY) !== 0 && t.indexOf(PREFIX_MSG) !== 0) {
-    addSys("收下失败（" + how + "）：这不像一条加密消息，应该以 "
-           + PREFIX_KEY + " 或 " + PREFIX_MSG + " 开头", "bad");
+  // 单条信封里绝不含空白字符；从微信/记事本粘过来容易带换行和空格，先清掉。
+  // 多行整块（多选复制）不能清 —— 要靠换行来拆分。
+  if (single) t = t.replace(/\s+/g, "");
+
+  if (!single && !batch) {
+    addSys("收下失败（" + how + "）：这不像加密消息 —— 单条应以 "
+           + PREFIX_KEY + " 或 " + PREFIX_MSG + " 开头；多行整块也可以", "bad");
     beacon("recv-manual-bad", "len=" + t.length);
     return false;
   }
 
-  beacon("recv-manual", how + " len=" + t.length);
-  addSys("已交给接收路径（" + how + "，" + t.length + " 字符）");
+  beacon("recv-manual", how + " len=" + t.length + " batch=" + batch);
+  addSys("已交给接收路径（" + how + "，" + t.length + " 字符"
+         + (batch ? "，多行会拆开逐条处理" : "") + "）");
   handleIncoming(t, "manual");
   return true;
 }
