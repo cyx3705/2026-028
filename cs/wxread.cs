@@ -78,14 +78,32 @@ internal static class WxReadMain
             if (mode == "sessions" || mode == "all")
             {
                 List<WxSession> ss = snap.Sessions();
-                w.WriteLine("\n== 会话 {0} 个 (最新 20) ==", ss.Count);
+                w.WriteLine("\n== 会话 {0} 个（按最后消息时间，最新 20）==", ss.Count);
                 for (int i = 0; i < ss.Count && i < 20; i++)
                 {
                     WxSession s = ss[i];
-                    w.WriteLine("[{0}] {1,-34} type={2,-4} unread={3,-5} sender={4} name={5}",
-                                Time(s.LastTimestamp), s.UserName, s.LastMsgType,
+                    w.WriteLine("[last {0} | sort {1}] {2,-34} type={3,-4} unread={4,-5} sender={5} name={6}",
+                                Time(s.LastTimestamp), Time(s.SortTimestamp),
+                                s.UserName, s.LastMsgType,
                                 s.Unread, s.LastSender, s.LastSenderName);
-                    w.WriteLine("      {0}", Clip(s.Summary, 120));
+                    w.WriteLine("      {0}", Clip(s.Summary, 110));
+                }
+
+                // 按 sort_timestamp 再排一遍：这个字段很可能是"会话被激活
+                // （点开）"的时间，而不是"收到消息"的时间。
+                List<WxSession> bySort = new List<WxSession>(ss);
+                bySort.Sort(delegate (WxSession a, WxSession b)
+                {
+                    return b.SortTimestamp.CompareTo(a.SortTimestamp);
+                });
+                w.WriteLine("\n== 同一批会话（按 sort_timestamp，最新 15）==");
+                for (int i = 0; i < bySort.Count && i < 15; i++)
+                {
+                    WxSession s = bySort[i];
+                    long d = s.SortTimestamp - s.LastTimestamp;
+                    w.WriteLine("[sort {0} | last {1} | 差 {2}s] {3,-34} {4}",
+                                Time(s.SortTimestamp), Time(s.LastTimestamp), d,
+                                s.UserName, Clip(s.Summary, 60));
                 }
 
                 if (mode == "all" && ss.Count > 0)
@@ -120,6 +138,61 @@ internal static class WxReadMain
                                 m.Sender, Clip(m.Text, 140));
                 }
             }
+            if (mode == "tables")
+            {
+                for (int d = 0; d < snap.Dbs.Count; d++)
+                {
+                    WxDb db = snap.Dbs[d];
+                    Dictionary<string, int> t;
+                    try { t = db.Tables(); }
+                    catch { continue; }
+                    if (t.Count == 0) continue;
+                    w.WriteLine("\nDB[{0}] DbPages={1} change={2} 缓存页={3} 表={4}",
+                                d, db.DbPages, db.ChangeCounter, db.PageOff.Count, t.Count);
+                    StringBuilder names = new StringBuilder();
+                    foreach (string k in t.Keys)
+                    {
+                        if (k.StartsWith("Msg_") && k.Length > 40) continue;  // 会话消息表太多
+                        names.Append(k).Append(' ');
+                    }
+                    w.WriteLine("  {0}", Clip(names.ToString(), 900));
+                    foreach (object[] mv in db.Master())
+                        if (mv.Length >= 5 && (mv[1] as string) == "contact")
+                            w.WriteLine("  contact SQL: {0}", mv[4]);
+                }
+            }
+
+            if (mode == "dump" && args.Length > 1)
+            {
+                string tbl = args[1];
+                int want = args.Length > 2 ? int.Parse(args[2]) : 6;
+                foreach (WxDb db in snap.Dbs)
+                {
+                    Dictionary<string, int> t;
+                    try { t = db.Tables(); }
+                    catch { continue; }
+                    int root;
+                    if (!t.TryGetValue(tbl, out root)) continue;
+                    w.WriteLine("\nDB DbPages={0} change={1} 缓存页={2}",
+                                db.DbPages, db.ChangeCounter, db.PageOff.Count);
+                    foreach (object[] mv in db.Master())
+                        if (mv.Length >= 5 && (mv[1] as string) == tbl)
+                            w.WriteLine("SQL: {0}", mv[4]);
+                    int n = 0;
+                    foreach (SqlRow r in db.TableRows(root))
+                    {
+                        StringBuilder line = new StringBuilder();
+                        for (int i = 0; i < r.Values.Length; i++)
+                        {
+                            if (i > 0) line.Append(" | ");
+                            line.Append(i).Append('=').Append(Fmt(r.Values[i]));
+                        }
+                        w.WriteLine("  rowid={0} {1}", r.RowId, Clip(line.ToString(), 400));
+                        if (++n >= want) break;
+                    }
+                    w.WriteLine("  （共列出 {0} 行）", n);
+                }
+            }
         }
         catch (Exception e)
         {
@@ -134,6 +207,19 @@ internal static class WxReadMain
                 Console.WriteLine("已写入 wxread_out.txt ({0} 字节)", sb.Length);
             }
         }
+    }
+
+    private static string Fmt(object v)
+    {
+        if (v == null) return "NULL";
+        if (v is byte[])
+        {
+            byte[] b = (byte[])v;
+            StringBuilder h = new StringBuilder();
+            for (int i = 0; i < b.Length && i < 16; i++) h.Append(b[i].ToString("x2"));
+            return "<" + b.Length + "B " + h + ">";
+        }
+        return Convert.ToString(v);
     }
 
     private static string Time(long t)

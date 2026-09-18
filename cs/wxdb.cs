@@ -300,36 +300,82 @@ namespace LocalChat
             }
         }
 
+        /// <summary>Rows of one leaf page, in cell (rowid) order.</summary>
+        private List<SqlRow> LeafCellRows(byte[] page, int hdr, int pg)
+        {
+            List<SqlRow> rows = new List<SqlRow>();
+            int ncell = (page[hdr + 3] << 8) | page[hdr + 4];
+            for (int i = 0; i < ncell; i++)
+            {
+                int p = (page[hdr + 8 + 2 * i] << 8) | page[hdr + 9 + 2 * i];
+                if (p < hdr + 8 || p >= PageSize) break;
+                long plen, rowid;
+                int n1 = Varint(page, p, PageSize, out plen);
+                if (n1 == 0) break;
+                int n2 = Varint(page, p + n1, PageSize, out rowid);
+                if (n2 == 0) break;
+                int start = p + n1 + n2;
+                int localLen;
+                byte[] rec = Assemble(page, start, plen, pg, out localLen);
+                if (rec == null) continue;
+                object[] vals = ParseRecord(rec, rec.Length);
+                if (vals == null) continue;
+                SqlRow r = new SqlRow();
+                r.RowId = rowid;
+                r.Values = vals;
+                rows.Add(r);
+            }
+            return rows;
+        }
+
+        /// <summary>
+        /// The right-most leaf of a table b-tree.  SQLite orders table b-trees by
+        /// rowid, so the newest rows live there -- which means finding new
+        /// messages costs O(tree depth) page reads instead of a full scan.
+        /// </summary>
+        public int[] RightmostLeaf(int root)
+        {
+            int pg = root;
+            for (int guard = 0; guard < 64; guard++)
+            {
+                byte[] page = Page(pg);
+                if (page == null) return null;
+                int hdr = (pg == 1) ? 100 : 0;
+                byte t = page[hdr];
+                if (t == 13) return new int[] { pg, hdr };
+                if (t != 5) return null;              // 只处理表 b-tree
+                int rm = (page[hdr + 8] << 24) | (page[hdr + 9] << 16) |
+                         (page[hdr + 10] << 8) | page[hdr + 11];
+                if (rm <= 0) return null;
+                pg = rm;
+            }
+            return null;
+        }
+
+        /// <summary>The last <paramref name="max"/> rows of a table, oldest first.</summary>
+        public List<SqlRow> TailRows(int root, int max)
+        {
+            List<SqlRow> all = new List<SqlRow>();
+            int[] leaf = RightmostLeaf(root);
+            if (leaf != null)
+            {
+                byte[] page = Page(leaf[0]);
+                if (page != null) all = LeafCellRows(page, leaf[1], leaf[0]);
+            }
+            if (all.Count == 0) return all;           // 最右叶子不在缓存里
+            if (all.Count > max) all.RemoveRange(0, all.Count - max);
+            return all;
+        }
+
         /// <summary>All rows of the table whose b-tree starts at <paramref name="root"/>.</summary>
         public List<SqlRow> TableRows(int root)
         {
             List<SqlRow> rows = new List<SqlRow>();
             foreach (int[] lp in LeafPages(root))
             {
-                int pg = lp[0], hdr = lp[1];
-                byte[] page = Page(pg);
+                byte[] page = Page(lp[0]);
                 if (page == null) continue;
-                int ncell = (page[hdr + 3] << 8) | page[hdr + 4];
-                for (int i = 0; i < ncell; i++)
-                {
-                    int p = (page[hdr + 8 + 2 * i] << 8) | page[hdr + 9 + 2 * i];
-                    if (p < hdr + 8 || p >= PageSize) return rows;
-                    long plen, rowid;
-                    int n1 = Varint(page, p, PageSize, out plen);
-                    if (n1 == 0) return rows;
-                    int n2 = Varint(page, p + n1, PageSize, out rowid);
-                    if (n2 == 0) return rows;
-                    int start = p + n1 + n2;
-                    int localLen;
-                    byte[] rec = Assemble(page, start, plen, pg, out localLen);
-                    if (rec == null) continue;
-                    object[] vals = ParseRecord(rec, rec.Length);
-                    if (vals == null) continue;
-                    SqlRow r = new SqlRow();
-                    r.RowId = rowid;
-                    r.Values = vals;
-                    rows.Add(r);
-                }
+                rows.AddRange(LeafCellRows(page, lp[1], lp[0]));
             }
             return rows;
         }
@@ -611,6 +657,7 @@ namespace LocalChat
                 {
                     WalkLru(img, kv.Key, x0, 40, pages);   // pLruNext
                     WalkLru(img, kv.Key, x0, 48, pages);   // pLruPrev
+                    WalkLru(img, kv.Key, x0, 24, pages);   // pNext（哈希链）
                 }
             }
             return pagers;
@@ -747,25 +794,45 @@ namespace LocalChat
 
         public List<WxSession> Sessions()
         {
-            List<WxSession> list = new List<WxSession>();
-            WxDb db = PooledWithTable("SessionTable");
-            if (db == null) return list;
-            int root = db.Tables()["SessionTable"];
-            foreach (SqlRow r in db.TableRows(root))
+            // 会话表往往只缓存了一部分页：实测同一个 session.db 的不同连接
+            // 缓存的是不同修订版，只挑"最新修订版"反而只读得到 53 个会话，
+            // 而实际上有一百五十多个 —— 于是"最近有动静"的判断就不可靠了。
+            //
+            // 所以把每个含 SessionTable 的库都读一遍，同一个 username 取
+            // change counter 最大的那一版：既补上覆盖，又保证是新鲜的。
+            List<WxDb> sorted = new List<WxDb>(Dbs);
+            sorted.Sort(delegate (WxDb a, WxDb b)
             {
-                object[] v = r.Values;
-                if (v.Length < 19 || !(v[0] is string)) continue;
-                WxSession s = new WxSession();
-                s.UserName = (string)v[0];
-                s.Unread = (int)AsLong(v[2]);
-                s.Summary = v[7] as string;
-                s.LastTimestamp = AsLong(v[10]);
-                s.SortTimestamp = AsLong(v[11]);
-                s.LastMsgType = AsLong(v[14]);
-                s.LastSender = v[16] as string;
-                s.LastSenderName = v[17] as string;
-                list.Add(s);
+                return b.ChangeCounter.CompareTo(a.ChangeCounter);
+            });
+            Dictionary<string, WxSession> byName = new Dictionary<string, WxSession>();
+            foreach (WxDb db in sorted)
+            {
+                int root;
+                try
+                {
+                    if (!db.Tables().TryGetValue("SessionTable", out root)) continue;
+                }
+                catch { continue; }
+                foreach (SqlRow r in db.TableRows(root))
+                {
+                    object[] v = r.Values;
+                    if (v.Length < 19 || !(v[0] is string)) continue;
+                    string u = (string)v[0];
+                    if (byName.ContainsKey(u)) continue;   // 已有更新的一版
+                    WxSession s = new WxSession();
+                    s.UserName = u;
+                    s.Unread = (int)AsLong(v[2]);
+                    s.Summary = v[7] as string;
+                    s.LastTimestamp = AsLong(v[10]);
+                    s.SortTimestamp = AsLong(v[11]);
+                    s.LastMsgType = AsLong(v[14]);
+                    s.LastSender = v[16] as string;
+                    s.LastSenderName = v[17] as string;
+                    byName[u] = s;
+                }
             }
+            List<WxSession> list = new List<WxSession>(byName.Values);
             list.Sort(delegate (WxSession a, WxSession b)
             {
                 return b.LastTimestamp.CompareTo(a.LastTimestamp);
@@ -858,49 +925,129 @@ namespace LocalChat
             }
         }
 
+        /// <summary>One Msg_ row -> a message, or null if the shape is wrong.</summary>
+        private static WxMessage ToMessage(string table, SqlRow r)
+        {
+            object[] v = r.Values;
+            if (v.Length != 17) return null;
+            WxMessage m = new WxMessage();
+            m.Table = table;
+            m.LocalId = r.RowId;
+            m.LocalType = AsLong(v[2]);
+            m.Sender = AsLong(v[4]);
+            m.CreateTime = AsLong(v[5]);
+            if (v[12] is string) m.Text = (string)v[12];
+            else if (v[12] is byte[])
+            {
+                byte[] raw = (byte[])v[12];
+                if (raw.Length >= 4 && raw[0] == 0x28 && raw[1] == 0xB5 &&
+                    raw[2] == 0x2F && raw[3] == 0xFD) m.Compressed = true;
+                else m.Text = Encoding.UTF8.GetString(raw);
+            }
+            return m;
+        }
+
         /// <summary>Messages of one conversation, newest first.</summary>
         public List<WxMessage> Messages(string sessionId, out string note)
         {
-            string table = "Msg_" + Md5Hex(sessionId);
+            return MessagesByTable("Msg_" + Md5Hex(sessionId), out note);
+        }
+
+        /// <summary>Messages of one Msg_ table, newest first.</summary>
+        public List<WxMessage> MessagesByTable(string table, out string note)
+        {
             List<WxMessage> outl = new List<WxMessage>();
             note = "";
             WxDb db = PooledWithTable(table);
             if (db == null)
             {
-                note = "页缓存里没有该会话的消息表";
+                note = "页缓存里没有这张表";
                 return outl;
             }
+            int root = db.Tables()[table];
+            foreach (SqlRow r in db.TableRows(root))
             {
-                int root = db.Tables()[table];
-                foreach (SqlRow r in db.TableRows(root))
-                {
-                    object[] v = r.Values;
-                    if (v.Length != 17) continue;
-                    WxMessage m = new WxMessage();
-                    m.Table = table;
-                    m.LocalId = r.RowId;
-                    m.LocalType = AsLong(v[2]);
-                    m.Sender = AsLong(v[4]);
-                    m.CreateTime = AsLong(v[5]);
-                    if (v[12] is string) m.Text = (string)v[12];
-                    else if (v[12] is byte[])
-                    {
-                        byte[] raw = (byte[])v[12];
-                        if (raw.Length >= 4 && raw[0] == 0x28 && raw[1] == 0xB5 &&
-                            raw[2] == 0x2F && raw[3] == 0xFD) m.Compressed = true;
-                        else m.Text = Encoding.UTF8.GetString(raw);
-                    }
-                    outl.Add(m);
-                }
-                note = string.Format("库 DbPages={0} change={1} 缺 {2} 页",
-                                     db.DbPages, db.ChangeCounter,
-                                     db.MissingCount);
+                WxMessage m = ToMessage(table, r);
+                if (m != null) outl.Add(m);
             }
+            note = string.Format("库 DbPages={0} change={1} 缺 {2} 页",
+                                 db.DbPages, db.ChangeCounter, db.MissingCount);
             outl.Sort(delegate (WxMessage a, WxMessage b)
             {
                 return b.CreateTime.CompareTo(a.CreateTime);
             });
             return outl;
+        }
+
+        /// <summary>
+        /// Newest rows of one Msg_ table, read from the right-most leaf only --
+        /// O(tree depth) instead of a full scan.  This is what polling uses.
+        /// </summary>
+        public List<WxMessage> TableTail(string table, int max, out string note)
+        {
+            List<WxMessage> outl = new List<WxMessage>();
+            note = "";
+            WxDb db = PooledWithTable(table);
+            if (db == null) { note = "不在页缓存里"; return outl; }
+            int root = db.Tables()[table];
+            foreach (SqlRow r in db.TailRows(root, max))
+            {
+                WxMessage m = ToMessage(table, r);
+                if (m != null) outl.Add(m);
+            }
+            note = string.Format("DbPages={0} change={1} 缺 {2} 页",
+                                 db.DbPages, db.ChangeCounter, db.MissingCount);
+            return outl;
+        }
+
+        /// <summary>
+        /// The message database that is most current: the one with the highest
+        /// file change counter that actually carries Msg_ tables.
+        /// </summary>
+        public WxDb MessageDb()
+        {
+            List<WxDb> sorted = new List<WxDb>(Dbs);
+            sorted.Sort(delegate (WxDb a, WxDb b)
+            {
+                return b.ChangeCounter.CompareTo(a.ChangeCounter);
+            });
+            foreach (WxDb db in sorted)
+            {
+                try
+                {
+                    foreach (string k in db.Tables().Keys)
+                        if (IsMsgTable(k)) return db;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>"Msg_" + 32 位小写十六进制，且不是 _SENDERID 之类的索引表。</summary>
+        public static bool IsMsgTable(string n)
+        {
+            if (n == null || n.Length != 4 + 32) return false;
+            if (!n.StartsWith("Msg_", StringComparison.Ordinal)) return false;
+            for (int i = 4; i < n.Length; i++)
+            {
+                char c = n[i];
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            }
+            return true;
+        }
+
+        /// <summary>所有会话消息表的名字。</summary>
+        public List<string> MessageTables()
+        {
+            List<string> names = new List<string>();
+            WxDb db = MessageDb();
+            if (db == null) return names;
+            Dictionary<string, int> t;
+            try { t = db.Tables(); }
+            catch { return names; }
+            foreach (string k in t.Keys) if (IsMsgTable(k)) names.Add(k);
+            names.Sort(StringComparer.Ordinal);
+            return names;
         }
 
         private static long AsLong(object o)

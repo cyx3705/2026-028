@@ -77,19 +77,15 @@ internal static class Bridge
     // ------------------------------------------------------------------
     private static string _readMode = "mem";
 
-    // 锁定的会话；空 = 自动取"最近有动静的真实会话"。
-    // 按对方的 wxid 锁定（1:1 就是 wxid_xxx，群是 xxx@chatroom，
-    // 文件传输助手是 filehelper），表名 = "Msg_" + md5(会话id)。
+    // 锁定的会话；空 = 自动（任何有动静的消息表都读）。
+    // 两种绑定方式：
+    //   _sessionId = 对方的 wxid / 群号，表名 = "Msg_" + md5(会话id)
+    //   _msgTable  = 直接指定 Msg_<md5> 表名（页面上的会话列表用这个）
     private static string _sessionId = "";
+    private static string _msgTable = "";
 
-    // 每个会话已处理到的最大 local_id，用来只挑真正新增的行。
+    // 每个消息表已处理到的最大 local_id，用来只挑真正新增的行。
     private static readonly Dictionary<string, long> _msgWatermark =
-        new Dictionary<string, long>();
-
-    // 每个会话上一次看到的"最后消息时间"。变了才去读那个会话 ——
-    // 这样任何真实会话来了新消息都不会漏，而开销只和"真正有动静的
-    // 会话数"成正比（一般每轮 0~2 个），不用每轮把 150 多个会话走一遍。
-    private static readonly Dictionary<string, long> _sessSeen =
         new Dictionary<string, long>();
 
     // 桥启动时刻（Unix 秒）。只有"启动之后到达"的消息才算新消息 ——
@@ -734,7 +730,10 @@ internal static class Bridge
     // 刚写入的页必然还在缓存里。
     // ------------------------------------------------------------------
 
-    /// <summary>会话库 WAL 的位置，用来判断"有没有新写入"。</summary>
+    /// <summary>
+    /// 所有库 WAL 的位置（用 | 连接），用来判断"有没有新写入"。
+    /// 现在读的是消息表，所以消息库的 WAL 是关键触发源。
+    /// </summary>
     private static string FindSessionWal()
     {
         try
@@ -742,18 +741,19 @@ internal static class Bridge
             string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             string root = Path.Combine(docs, "xwechat_files");
             if (!Directory.Exists(root)) return null;
-            string best = null;
-            DateTime bestT = DateTime.MinValue;
+            List<string> found = new List<string>();
             foreach (string d in Directory.GetDirectories(root))
             {
-                string p = Path.Combine(d, "db_storage");
-                p = Path.Combine(p, "session");
-                p = Path.Combine(p, "session.db-wal");
-                if (!File.Exists(p)) continue;
-                DateTime t = File.GetLastWriteTime(p);
-                if (t > bestT) { bestT = t; best = p; }
+                string ds = Path.Combine(d, "db_storage");
+                if (!Directory.Exists(ds)) continue;
+                foreach (string sub in Directory.GetDirectories(ds))
+                {
+                    foreach (string f in Directory.GetFiles(sub, "*.db-wal"))
+                        found.Add(f);
+                }
             }
-            return best;
+            if (found.Count == 0) return null;
+            return string.Join("|", found.ToArray());
         }
         catch { return null; }
     }
@@ -765,12 +765,21 @@ internal static class Bridge
         if (_walPath == null) return true;      // 找不到就每次都读
         try
         {
-            FileInfo fi = new FileInfo(_walPath);
-            if (!fi.Exists) return true;
-            if (fi.Length != _walLen || fi.LastWriteTime != _walTime)
+            long len = 0;
+            DateTime t = DateTime.MinValue;
+            string[] parts = _walPath.Split('|');
+            for (int i = 0; i < parts.Length; i++)
             {
-                _walLen = fi.Length;
-                _walTime = fi.LastWriteTime;
+                if (parts[i].Length == 0) continue;
+                FileInfo fi = new FileInfo(parts[i]);
+                if (!fi.Exists) continue;
+                len += fi.Length;
+                if (fi.LastWriteTime > t) t = fi.LastWriteTime;
+            }
+            if (len != _walLen || t != _walTime)
+            {
+                _walLen = len;
+                _walTime = t;
                 return true;
             }
         }
@@ -833,96 +842,62 @@ internal static class Bridge
             return null;
         }
 
-        List<WxSession> sessions = snap.Sessions();
-        List<WxSession> picks = new List<WxSession>();
-        if (_sessionId.Length > 0)
+        // 以"消息表"为准，不再用会话表：会话表只缓存得到一部分
+        // （实测 153 个会话里只有 53 个读得到），拿它判断"哪个会话有动静"
+        // 根本不可靠 —— 这就是"朋友的对话总是识别不到"的直接原因。
+        //
+        // 消息库的 sqlite_master 里有 80 多张 Msg_<md5> 表，每张表只看
+        // b-tree 最右叶子就能拿到它最新的几行，代价是 O(树深) 而不是全表。
+        List<string> tables = new List<string>();
+        if (_msgTable.Length > 0) tables.Add(_msgTable);
+        else if (_sessionId.Length > 0) tables.Add("Msg_" + WxSnapshot.Md5Hex(_sessionId));
+        else tables = snap.MessageTables();
+        if (tables.Count == 0)
         {
-            foreach (WxSession s in sessions)
-                if (s != null && s.UserName == _sessionId) { picks.Add(s); break; }
-        }
-        else if (catchUp)
-        {
-            // 手动拉取：给最近有动静的几个真实会话，让用户能立刻看到东西。
-            foreach (WxSession s in sessions)
-            {
-                if (s == null || s.UserName == null) continue;
-                if (IsNoiseSession(s.UserName)) continue;
-                if (s.LastTimestamp <= 0) continue;
-                picks.Add(s);                       // Sessions() 已按时间倒序
-                if (picks.Count >= 3) break;
-            }
-        }
-        else
-        {
-            // 自动：**任何一个**真实会话的最后消息时间变了就读它。
-            // 不限定个数 —— 限定个数会漏掉同时到消息的其它会话。
-            // 首次轮询只记基线不读（否则会把页缓存里的旧消息全捞出来）。
-            bool primed = _sessSeen.Count > 0;
-            foreach (WxSession s in sessions)
-            {
-                if (s == null || s.UserName == null) continue;
-                if (IsNoiseSession(s.UserName)) continue;
-                if (s.LastTimestamp <= 0) continue;
-
-                long prev;
-                bool known = _sessSeen.TryGetValue(s.UserName, out prev);
-                _sessSeen[s.UserName] = s.LastTimestamp;
-
-                if (!primed) continue;              // 首轮只建基线
-                if (known && prev == s.LastTimestamp) continue;   // 这个会话没动静
-                picks.Add(s);
-            }
-        }
-        if (picks.Count == 0)
-        {
-            _lastPullNote = Stamp() + " " + why + "：没有会话有新动静"
-                          + (_sessionId.Length > 0 ? "（锁定 " + _sessionId + " 不在列表里）" : "");
-            if (sessions.Count > 0) _lastReadSawSession = true;
+            _lastPullNote = Stamp() + " " + why + "：页缓存里没有消息表";
             return null;
         }
 
         List<PullItem> take = new List<PullItem>();
-        List<string> hitSids = new List<string>();
-        foreach (WxSession target in picks)
+        List<string> hits = new List<string>();
+        int readable = 0;
+        for (int ti = 0; ti < tables.Count; ti++)
         {
-            string sid = target.UserName;
+            string tbl = tables[ti];
             string note;
-            List<WxMessage> msgs = snap.Messages(sid, out note);
-            total += msgs.Count;
+            List<WxMessage> tail = snap.TableTail(tbl, 6, out note);
+            if (tail.Count == 0) continue;
+            readable++;
+            total += tail.Count;
 
             long mark;
-            _msgWatermark.TryGetValue(sid, out mark);
+            _msgWatermark.TryGetValue(tbl, out mark);
             long maxId = mark;
-            string who = target.LastSenderName;
-            if (string.IsNullOrEmpty(who)) who = sid;
             int got = 0;
-            foreach (WxMessage m in msgs)              // 新的在前
+            for (int i = 0; i < tail.Count; i++)      // 行序 = rowid 升序
             {
+                WxMessage m = tail[i];
                 if (m.LocalId > maxId) maxId = m.LocalId;
-                if (catchUp)
-                {
-                    // 手动拉取：不管水位，直接把最近几条给它看。
-                }
-                else
+                if (!catchUp)
                 {
                     if (m.LocalId <= mark) continue;
                     if (m.CreateTime < _startedAt) continue;
                 }
                 PullItem it = new PullItem();
                 it.Msg = m;
-                it.Who = who;
+                it.Who = tbl.Substring(4, 8);
                 take.Add(it);
                 got++;
             }
-            _msgWatermark[sid] = maxId;
-            if (got > 0) hitSids.Add(sid + "×" + got);
+            _msgWatermark[tbl] = maxId;
+            if (got > 0) hits.Add(tbl.Substring(4, 8) + "×" + got);
         }
+        _lastReadSawSession = readable > 0;
         fresh = take.Count;
-        _lastReadSawSession = true;         // 能读到会话本身就说明库是通的
         if (fresh == 0)
         {
-            _lastPullNote = Stamp() + " " + why + "：最近会话都没有新消息（可达 "
-                          + total + " 条）";
+            _lastPullNote = Stamp() + " " + why + "：没有新消息（可读消息表 "
+                          + readable + "/" + tables.Count + "）";
             return null;
         }
 
@@ -951,7 +926,7 @@ internal static class Bridge
             sb.Append('\n');
         }
         _lastPullNote = Stamp() + " " + why + "拉取：拿到 " + take.Count + " 条"
-                      + "（" + string.Join("、", hitSids.ToArray()) + "）";
+                      + "（" + string.Join("、", hits.ToArray()) + "）";
         return sb.ToString();
     }
 
@@ -960,6 +935,61 @@ internal static class Bridge
     {
         public WxMessage Msg;
         public string Who;
+    }
+
+    private sealed class TableEntry
+    {
+        public long Time;
+        public string Json;
+    }
+
+    /// <summary>
+    /// 页缓存里现在读得到的会话消息表，按最新消息时间倒序，带一条预览。
+    /// 页面用它列出来让人挑一个绑定。
+    ///
+    /// 这条路刻意不依赖 session.db：会话表实测只能读到一部分
+    /// （153 个会话里只读得到 53 个），而消息库里每张 Msg_ 表只要最右叶子
+    /// 在缓存里就能读到 —— 所以"会话表里读不到"的对话照样能绑定。
+    /// </summary>
+    private static string TablesJson()
+    {
+        try
+        {
+            EnsureWeChat();
+            if (_wechatPid == 0) return "[]";
+            WxSnapshot snap = WxSnapshot.CaptureAuto(_wechatPid);
+            List<string> names = snap.MessageTables();
+            List<TableEntry> list = new List<TableEntry>();
+            for (int i = 0; i < names.Count; i++)
+            {
+                string note;
+                List<WxMessage> tail = snap.TableTail(names[i], 2, out note);
+                if (tail.Count == 0) continue;
+                WxMessage last = tail[tail.Count - 1];
+                string prev = last.Text;
+                if (string.IsNullOrEmpty(prev)) prev = TypePlaceholder(last.LocalType);
+                if (prev.Length > 60) prev = prev.Substring(0, 60);
+                TableEntry e = new TableEntry();
+                e.Time = last.CreateTime;
+                e.Json = "{\"table\":\"" + names[i] + "\",\"md5\":\""
+                       + names[i].Substring(4) + "\",\"time\":" + last.CreateTime
+                       + ",\"type\":" + last.LocalType
+                       + ",\"preview\":\"" + JsonEscape(prev) + "\"}";
+                list.Add(e);
+            }
+            list.Sort(delegate(TableEntry a, TableEntry b)
+            {
+                return b.Time.CompareTo(a.Time);
+            });
+            List<string> js = new List<string>();
+            for (int i = 0; i < list.Count; i++) js.Add(list[i].Json);
+            return "[" + string.Join(",", js.ToArray()) + "]";
+        }
+        catch (Exception ex)
+        {
+            Log("会话列表失败: " + ex.Message);
+            return "[]";
+        }
     }
 
     /// <summary>手动拉取：两种读取方式共用入口。</summary>
@@ -1694,10 +1724,37 @@ internal static class Bridge
                     if (msg.TryGetValue("id", out sidObj) && sidObj != null)
                         sid = Convert.ToString(sidObj).Trim();
                     _sessionId = sid;
-                    _msgWatermark.Remove(sid);
-                    _sessSeen.Clear();          // 换会话就重新建一次基线
-                    Log("读取会话: " + (sid.Length == 0 ? "自动（任何有动静的会话）" : sid));
+                    _msgTable = "";
+                    _msgWatermark.Clear();
+                    Log("读取会话: " + (sid.Length == 0 ? "自动（任何有动静的消息表）" : sid));
                     WsSendText(client, "{\"type\":\"session\",\"id\":\"" + JsonEscape(sid) + "\"}");
+                }
+                else if (type == "bind")
+                {
+                    // 绑定要读的会话。两种方式二选一：
+                    //   session = 对方 wxid / 群号（表名 = "Msg_" + md5(会话id)）
+                    //   table   = 直接给 Msg_<md5> 表名（页面上的会话列表用这个）
+                    object o;
+                    string sid = "", tbl = "";
+                    if (msg.TryGetValue("session", out o) && o != null)
+                        sid = Convert.ToString(o).Trim();
+                    if (msg.TryGetValue("table", out o) && o != null)
+                        tbl = Convert.ToString(o).Trim();
+                    if (tbl.Length > 0) sid = "";
+                    _sessionId = sid;
+                    _msgTable = tbl;
+                    _msgWatermark.Clear();
+                    Log("绑定会话: session=" + (sid.Length == 0 ? "(无)" : sid)
+                        + " table=" + (tbl.Length == 0 ? "(无，自动)" : tbl));
+                    WsSendText(client, "{\"type\":\"bound\",\"session\":\""
+                                     + JsonEscape(sid) + "\",\"table\":\""
+                                     + JsonEscape(tbl) + "\"}");
+                }
+                else if (type == "tables")
+                {
+                    // 页缓存里现在读得到的会话消息表（带最新一条预览），
+                    // 供页面列出让人挑一个绑定。
+                    WsSendText(client, "{\"type\":\"tables\",\"list\":" + TablesJson() + "}");
                 }
             }
         }
@@ -1733,6 +1790,9 @@ internal static class Bridge
             if (args[i] == "--session" && i + 1 < args.Length) _sessionId = args[i + 1];
             if (args[i].StartsWith("--session=", StringComparison.Ordinal))
                 _sessionId = args[i].Substring(10);
+            if (args[i] == "--table" && i + 1 < args.Length) _msgTable = args[i + 1];
+            if (args[i].StartsWith("--table=", StringComparison.Ordinal))
+                _msgTable = args[i].Substring(8);
         }
         if (_readMode != "clip") _readMode = "mem";
         _startedAt = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
@@ -1765,9 +1825,11 @@ internal static class Bridge
         Log("读取方式: " + (_readMode == "mem"
             ? "内存（读 SQLCipher 解密后的页缓存，不用密钥、不动鼠标）"
             : "剪贴板（拖长方形 + Ctrl+C，旧路径）"));
-        Log("读取会话: " + (_sessionId.Length == 0
-            ? "自动（任何有动静的会话）"
-            : _sessionId));
+        Log("读取会话: " + (_msgTable.Length > 0
+            ? "绑定表 " + _msgTable
+            : (_sessionId.Length > 0
+               ? "绑定 " + _sessionId
+               : "自动（任何有动静的消息表都读，不依赖会话表）")));
 
         Thread watcher = new Thread(ClipboardWatcher);
         watcher.IsBackground = true;
