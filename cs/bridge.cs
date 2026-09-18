@@ -51,6 +51,10 @@ internal static class Bridge
 
     private static string _pagePath;
     private static string _lastSentText = "";
+
+    // 我们最后一次往剪贴板写内容之后的剪贴板序号。
+    // 用它精确识别"这一次剪贴板变化是桥自己造成的"，见 ClipboardWatcher 的注释。
+    private static uint _lastSentSeq = 0;
     private static IntPtr _wechatHwnd = IntPtr.Zero;
     private static int _wechatPid = 0;
 
@@ -377,6 +381,7 @@ internal static class Bridge
             return "error: 写剪贴板失败（可能被其它程序占用），已中止";
         }
         _lastSentText = text;
+        _lastSentSeq = GetClipboardSequenceNumber();
 
         if (!ActivateWeChat())
         {
@@ -640,7 +645,29 @@ internal static class Bridge
 
                 string text = GetClipboardText();
                 if (string.IsNullOrEmpty(text)) continue;
-                if (text == _lastSentText) continue;   // do not echo our own paste
+
+                // 跳过"我们自己刚粘进去"的那一次变化。
+                //
+                // 这里原来只有 `if (text == _lastSentText) continue;` —— 那是错的：
+                // 只要内容跟"桥最后一次粘出去的"相同就永久忽略，于是用户事后
+                // 主动 Ctrl+C 复制同一条消息时，桥一声不响，页面永远收不到。
+                // 单机自测（测试模式把对方的回复也发到微信）时必现。
+                //
+                // 现在两条判据都要，但都只吞一次：
+                //   now == _lastSentSeq  -> 这次变化就是我们造成的，精确
+                //   text == _lastSentText -> 兜住竞态：序号是粘贴前读的、文本是粘贴后读的
+                if (now == _lastSentSeq)
+                {
+                    _lastSentSeq = 0; _lastSentText = "";
+                    Log("剪贴板变化 忽略（我们自己刚粘的那一次）");
+                    continue;
+                }
+                if (text == _lastSentText)
+                {
+                    _lastSentText = "";   // 只吞一次，之后同样的内容照推
+                    Log("剪贴板变化 忽略（回声，仅此一次）");
+                    continue;
+                }
 
                 Log("剪贴板变化 -> 推给网页 (" + text.Length + " 字符)");
                 Broadcast("{\"type\":\"clipboard\",\"text\":\"" + JsonEscape(text) + "\"}");

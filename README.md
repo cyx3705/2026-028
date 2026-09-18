@@ -21,7 +21,7 @@
 
 | 部件 | 是什么 | 为什么这么做 |
 |---|---|---|
-| `page/chat.html` | **单文件网页**（113 KB），发给对方的就是它 | 加解密全在浏览器里，**零安装**。它把桥的源码也内嵌进去了 |
+| `page/chat.html` | **单文件网页**（114 KB），发给对方的就是它 | 加解密全在浏览器里，**零安装**。它把桥的源码也内嵌进去了 |
 | `cs/bridge.cs` | **剪贴板桥**，C# / .NET Framework 4.x | 用每个 Windows 都自带的 `csc.exe` 现场编译，**用户什么都不用装** |
 
 桥只做两件事，都靠剪贴板：
@@ -74,7 +74,7 @@ SecurityError: Sandboxed documents aren't allowed to show a file picker.
 │   └── README.md              网页侧详细文档
 │
 ├── cs/                        桥
-│   ├── bridge.cs              ★ 核心，36 KB
+│   ├── bridge.cs              ★ 核心，37 KB
 │   ├── build.bat              用系统 csc.exe 编译
 │   ├── start.bat              编译（如需要）+ 启动
 │   └── README.md              桥的详细文档
@@ -82,6 +82,7 @@ SecurityError: Sandboxed documents aren't allowed to show a file picker.
 ├── wsprobe.py                 绕开页面，直接跟桥的 WebSocket 说话
 ├── pretest.py                 测试前清场：关桥 + 验证 8765 真的空着
 ├── beacon.py                  页面探针接收端（8766，只收诊断日志，不碰 8765）
+├── test_clipboard_echo.py     回归测试：桥不能把用户事后复制的内容当回声吞掉
 └── .gitattributes             禁止一切行尾自动转换（见文件内注释）
 ```
 
@@ -136,6 +137,7 @@ python build_page.py
 | `page/test_receive.js` | 把整个页面脚本用 **DOM 桩**加载，直接调页面里的 `handleIncoming`（跟"对面 Ctrl+C"同一个入口）：**收下对方公钥后药丸变绿、输入框解锁、指纹显示**；自己的公钥被拒；坏公钥不破坏状态；**手动收下**（粘贴框）各条分支 | **38 / 38** |
 | `wsprobe.py --status` | 桥的 WebSocket 是否活着（安全探针，不碰微信、不按键） | ✅ |
 | `wsprobe.py --send "…"` | 真发一条到微信当前对话 | ✅ `{"sent","ok":true}` |
+| `test_clipboard_echo.py` | 回归测试：桥刚粘出去的内容，用户事后 `Ctrl+C` 复制回来时**必须照样推送**（不能当成回声吞掉） | ✅ |
 | 微信落地 | 桥的 `/shot` 截图 + 侧栏预览核对 | ✅ |
 
 ```cmd

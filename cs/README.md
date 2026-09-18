@@ -32,7 +32,7 @@ System.Web.Extensions 4.0.0.0
                     ← 全部是 .NET Framework 的一部分，没有一个外部包
 ```
 
-**体积**：`bridge.cs` 源码 **36 KB** → `bridge.exe` **22 KB**。
+**体积**：`bridge.cs` 源码 **37 KB** → `bridge.exe` **22 KB**。
 
 > 36 KB 的源码小到可以直接**内嵌进 HTML 页面**——这就是"网页里带安装包"的落点。
 > 用户点一下，页面把源码吐成 `.bat`，用系统自带的 `csc.exe` 现场编译，全程不下载任何东西。
@@ -117,7 +117,7 @@ python wsprobe.py --send "内容"      REM 真发一条到微信当前对话
 
 ---
 
-## 三个真踩过的 bug
+## 四个真踩过的 bug
 
 ### 1. 全局锁 + 阻塞写 = 整个桥无声哑掉
 
@@ -159,6 +159,41 @@ lock (ClientsLock)                    // 全局锁
 
 `Exception.ToString()` 都会失败，看不到任何有效信息。启动前先确认 8765 空闲——
 用 `pretest.py`，它会用**真实 TCP 连接**确认（`Get-NetTCPConnection` 在这台机器上会谎报"空闲"）。
+
+### 4. 防回声判断写成了"内容比较"，把用户的操作也一起吞了
+
+`ClipboardWatcher` 原本是这么防回声的：
+
+```csharp
+if (text == _lastSentText) continue;   // do not echo our own paste
+```
+
+只要剪贴板内容跟"桥最后一次粘出去的"相同就**永久**忽略。问题是：
+用户事后主动 `Ctrl+C` 复制**同一条消息**时，内容当然一样 —— 于是桥一声不响，
+页面永远收不到。
+
+真实两端使用时不会撞上（对面的桥没有这条记录），但**单机自测必现**：
+测试模式会把"对方的回复密文"也发到微信，你复制回来想看页面能不能解开，
+结果什么都不会发生。
+
+**修法**：别比内容，比**剪贴板序号**。
+
+```csharp
+// 粘完记住序号
+_lastSentText = text;
+_lastSentSeq = GetClipboardSequenceNumber();
+
+// 监听循环里：精确识别"这一次变化是我们造成的"
+if (now == _lastSentSeq) { _lastSentSeq = 0; _lastSentText = ""; continue; }
+if (text == _lastSentText) { _lastSentText = ""; continue; }   // 兜住竞态，且只吞一次
+```
+
+两条判据都要：序号那条**精确**；文本那条兜住"序号是粘贴前读的、文本是粘贴后读的"
+这个竞态。但文本那条**只能生效一次**——否则又退回成永久忽略。
+两条都在日志里留痕（`剪贴板变化 忽略（我们自己刚粘的那一次）`），以后好查。
+
+回归测试 `../test_clipboard_echo.py`（需要桥在跑）：发一条独特文本 →
+等桥粘完 → 把**同样的内容**重新写进剪贴板模拟 Ctrl+C → 断言桥推给了网页。
 
 ---
 
