@@ -11,6 +11,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -157,8 +158,8 @@ namespace LocalChat
             {
                 if (p + i >= end) { v = 0; return 0; }
                 byte c = b[p + i];
-                if (i == 8) { v = (v << 8) | (long)c; return 9; }
-                v = (v << 7) | (long)(c & 0x7F);
+                if (i == 8) { v = (v << 8) + c; return 9; }
+                v = (v << 7) + (c & 0x7F);
                 if ((c & 0x80) == 0) return i + 1;
             }
             return 9;
@@ -423,6 +424,37 @@ namespace LocalChat
                                    img.Data.Length / 1048576.0, img.RegionCount,
                                    pagers.Count);
             s.Dbs = GroupDatabases(img, pagers);
+            return s;
+        }
+
+        /// <summary>
+        /// Capture from the given pid, but if that process turns out to hold no
+        /// page cache, try the other Weixin processes.  A window handle can
+        /// belong to a tray or renderer process rather than the main one, and
+        /// only the main process owns the databases.
+        /// </summary>
+        public static WxSnapshot CaptureAuto(int preferredPid)
+        {
+            WxSnapshot s = Capture(preferredPid);
+            if (s.Dbs.Count > 0) return s;
+            string note = s.Note;
+            try
+            {
+                Process[] ps = Process.GetProcessesByName("Weixin");
+                for (int i = 0; i < ps.Length; i++)
+                {
+                    if (ps[i].Id == preferredPid) continue;
+                    WxSnapshot t = Capture(ps[i].Id);
+                    if (t.Dbs.Count > 0)
+                    {
+                        t.Note = t.Note + "（pid " + ps[i].Id
+                               + "，不是窗口所属的 " + preferredPid + "）";
+                        return t;
+                    }
+                }
+            }
+            catch { }
+            s.Note = note + "；其它 Weixin 进程里也没有页缓存";
             return s;
         }
 

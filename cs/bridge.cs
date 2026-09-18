@@ -28,6 +28,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
+using LocalChat;          // wxdb.cs：从微信进程内存里读解密后的 SQLite 页
 
 internal static class Bridge
 {
@@ -67,6 +68,45 @@ internal static class Bridge
     private static DateTime _autoPullQuietUntil = DateTime.MinValue;
     private static string _lastPullNote = "从未拉取";
     private static DateTime _suppressClipboardUntil = DateTime.MinValue;
+
+    // ------------------------------------------------------------------
+    // 读取方式
+    //
+    // mem  = 从微信进程内存里读 SQLCipher 解密后的 SQLite 页（默认）
+    // clip = 旧的"拖长方形 + Ctrl+C"路径，留作退路
+    // ------------------------------------------------------------------
+    private static string _readMode = "mem";
+
+    // 锁定的会话；空 = 自动取"最近有动静的真实会话"。
+    // 按对方的 wxid 锁定（1:1 就是 wxid_xxx，群是 xxx@chatroom，
+    // 文件传输助手是 filehelper），表名 = "Msg_" + md5(会话id)。
+    private static string _sessionId = "";
+
+    // 每个会话已处理到的最大 local_id，用来只挑真正新增的行。
+    private static readonly Dictionary<string, long> _msgWatermark =
+        new Dictionary<string, long>();
+
+    // 桥启动时刻（Unix 秒）。只有"启动之后到达"的消息才算新消息 ——
+    // 这样启动时不会把页缓存里的旧消息当成新消息刷出来，
+    // 也不需要预先给一百多个会话各打一次水位。
+    private static long _startedAt = 0;
+
+    // 内存模式下"微信是否可用"的判据：能不能读到会话库。
+    // 不能再用窗口尺寸判断 —— 微信收进托盘或最小化时窗口是 237x39，
+    // 那时候 WeChatLooksLoggedIn 会误报未登录，而内存读取根本不需要窗口。
+    private static bool _lastReadSawSession = false;
+
+    // 会话库 WAL 的指纹。它一变就说明有写入，才值得去抓一次内存快照
+    // （抓一次 253MB 约 0.4 秒，不能无脑轮询）。
+    private static string _walPath = null;
+    private static long _walLen = -1;
+    private static DateTime _walTime = DateTime.MinValue;
+
+    // 公众号等"永远在动"的会话会把"最近会话"顶掉，读取时排除。
+    private static readonly string[] _noiseSessions = {
+        "brandsessionholder", "brandservicesessionholder",
+        "@placeholder_foldgroup", "filehelper_placeholder"
+    };
 
     // ------------------------------------------------------------------
     // Win32 interop
@@ -431,6 +471,10 @@ internal static class Bridge
     private static string WeChatState()
     {
         if (_wechatHwnd == IntPtr.Zero) return "not-found";
+        // 内存模式下"能不能用"和窗口无关：微信收进托盘、最小化、甚至
+        // 窗口尺寸只报 237x39，都照样能读库。窗口尺寸那道判断是给
+        // 剪贴板模式用的（它必须切窗口、必须窗口够大才不是登录界面）。
+        if (_readMode == "mem") return _wechatPid != 0 ? "ready" : "not-found";
         return WeChatLooksLoggedIn(_wechatHwnd) ? "ready" : "not-logged-in";
     }
 
@@ -672,46 +716,277 @@ internal static class Bridge
         Log("自动拉取: 微信切到前台，已排队");
     }
 
+    // ------------------------------------------------------------------
+    // 从微信进程内存里读消息
+    //
+    // 微信 4.x 的库是 SQLCipher 加密的，但 SQLCipher 每解一页就把明文放进
+    // SQLite 的页缓存，所以明文本来就在进程堆上。WxSnapshot 顺着 pcache1 的
+    // PgHdr1 把页缓存枚举出来就能当普通 SQLite 读 —— 不需要密钥，也就不用
+    // 去暴力破解（PBKDF2 256000 轮是 170ms 一次，根本不现实）。
+    //
+    // 代价：只能看到页缓存里还有的页。所以它的正确用法就是"消息一到就去读"，
+    // 刚写入的页必然还在缓存里。
+    // ------------------------------------------------------------------
+
+    /// <summary>会话库 WAL 的位置，用来判断"有没有新写入"。</summary>
+    private static string FindSessionWal()
+    {
+        try
+        {
+            string docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            string root = Path.Combine(docs, "xwechat_files");
+            if (!Directory.Exists(root)) return null;
+            string best = null;
+            DateTime bestT = DateTime.MinValue;
+            foreach (string d in Directory.GetDirectories(root))
+            {
+                string p = Path.Combine(d, "db_storage");
+                p = Path.Combine(p, "session");
+                p = Path.Combine(p, "session.db-wal");
+                if (!File.Exists(p)) continue;
+                DateTime t = File.GetLastWriteTime(p);
+                if (t > bestT) { bestT = t; best = p; }
+            }
+            return best;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>会话库 WAL 变了没有。抓一次快照要 0.4 秒，不能无脑轮询。</summary>
+    private static bool WalChanged()
+    {
+        if (_walPath == null) _walPath = FindSessionWal();
+        if (_walPath == null) return true;      // 找不到就每次都读
+        try
+        {
+            FileInfo fi = new FileInfo(_walPath);
+            if (!fi.Exists) return true;
+            if (fi.Length != _walLen || fi.LastWriteTime != _walTime)
+            {
+                _walLen = fi.Length;
+                _walTime = fi.LastWriteTime;
+                return true;
+            }
+        }
+        catch { return true; }
+        return false;
+    }
+
+    /// <summary>公众号之类"永远在动"的会话会把"最近会话"顶掉，排除掉。</summary>
+    private static bool IsNoiseSession(string u)
+    {
+        if (u == null) return true;
+        if (u.StartsWith("gh_", StringComparison.Ordinal)) return true;
+        if (u.EndsWith("@openim", StringComparison.Ordinal)) return true;
+        for (int i = 0; i < _noiseSessions.Length; i++)
+            if (u == _noiseSessions[i]) return true;
+        return false;
+    }
+
+    private static string Stamp()
+    {
+        return DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>非文本消息给个占位，免得正文是空的让页面以为解析失败。</summary>
+    private static string TypePlaceholder(long t)
+    {
+        if (t == 3) return "[图片]";
+        if (t == 34) return "[语音]";
+        if (t == 43) return "[视频]";
+        if (t == 47) return "[表情]";
+        if (t == 49) return "[链接或文件]";
+        if (t == 10000) return "[系统消息]";
+        return "[类型 " + t + "]";
+    }
+
+    /// <summary>
+    /// 读一次消息，产出和剪贴板路径**完全一样**的纯文本，页面端不用改：
+    ///     发送者
+    ///     2026年09月18日 17:17
+    ///     正文
+    /// 空行分隔。没有新消息返回 null。
+    /// </summary>
+    /// <param name="catchUp">手动拉取：忽略"启动之后才算新"的限制，直接给最近几条。</param>
+    private static string MemPull(string why, bool catchUp, out int total, out int fresh)
+    {
+        total = 0;
+        fresh = 0;
+        EnsureWeChat();
+        if (_wechatPid == 0)
+        {
+            _lastPullNote = Stamp() + " " + why + "拉取失败：没找到微信进程";
+            return null;
+        }
+
+        WxSnapshot snap;
+        try { snap = WxSnapshot.CaptureAuto(_wechatPid); }
+        catch (Exception ex)
+        {
+            _lastPullNote = Stamp() + " " + why + "拉取失败：" + ex.Message;
+            return null;
+        }
+
+        List<WxSession> sessions = snap.Sessions();
+        List<WxSession> picks = new List<WxSession>();
+        if (_sessionId.Length > 0)
+        {
+            foreach (WxSession s in sessions)
+                if (s != null && s.UserName == _sessionId) { picks.Add(s); break; }
+        }
+        else
+        {
+            // 不只盯最近那一个会话：同一刻公众号消息插进来就会把你要的
+            // 那条顶到第二、第三位，只看一个就会漏掉。
+            foreach (WxSession s in sessions)
+            {
+                if (s == null || s.UserName == null) continue;
+                if (IsNoiseSession(s.UserName)) continue;
+                if (s.LastTimestamp <= 0) continue;
+                picks.Add(s);                       // Sessions() 已按时间倒序
+                if (picks.Count >= 3) break;
+            }
+        }
+        if (picks.Count == 0)
+        {
+            _lastPullNote = Stamp() + " " + why + "：没有可读的会话"
+                          + (_sessionId.Length > 0 ? "（锁定 " + _sessionId + " 不在列表里）" : "");
+            return null;
+        }
+
+        List<PullItem> take = new List<PullItem>();
+        List<string> hitSids = new List<string>();
+        foreach (WxSession target in picks)
+        {
+            string sid = target.UserName;
+            string note;
+            List<WxMessage> msgs = snap.Messages(sid, out note);
+            total += msgs.Count;
+
+            long mark;
+            _msgWatermark.TryGetValue(sid, out mark);
+            long maxId = mark;
+            string who = target.LastSenderName;
+            if (string.IsNullOrEmpty(who)) who = sid;
+            int got = 0;
+            foreach (WxMessage m in msgs)              // 新的在前
+            {
+                if (m.LocalId > maxId) maxId = m.LocalId;
+                if (catchUp)
+                {
+                    // 手动拉取：不管水位，直接把最近几条给它看。
+                }
+                else
+                {
+                    if (m.LocalId <= mark) continue;
+                    if (m.CreateTime < _startedAt) continue;
+                }
+                PullItem it = new PullItem();
+                it.Msg = m;
+                it.Who = who;
+                take.Add(it);
+                got++;
+            }
+            _msgWatermark[sid] = maxId;
+            if (got > 0) hitSids.Add(sid + "×" + got);
+        }
+        fresh = take.Count;
+        _lastReadSawSession = true;         // 能读到会话本身就说明库是通的
+        if (fresh == 0)
+        {
+            _lastPullNote = Stamp() + " " + why + "：最近会话都没有新消息（可达 "
+                          + total + " 条）";
+            return null;
+        }
+
+        take.Sort(delegate(PullItem a, PullItem b)
+        {
+            return a.Msg.CreateTime.CompareTo(b.Msg.CreateTime);
+        });
+        if (take.Count > 5) take.RemoveRange(0, take.Count - 5);   // 只留最新 5 条
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < take.Count; i++)
+        {
+            PullItem it = take[i];
+            WxMessage m = it.Msg;
+            string body = string.IsNullOrEmpty(m.Text) ? TypePlaceholder(m.LocalType) : m.Text;
+            // 群消息的正文里本来就带"发送者wxid:"前缀（微信自己写的）。
+            // 这里再补一行发送者，纯粹为了和剪贴板路径的输出格式一致 ——
+            // 页面那边的 parseWeChatDump 会把这一行连同日期行一起丢掉。
+            sb.Append(it.Who);
+            sb.Append('\n');
+            sb.Append(new DateTime(1970, 1, 1).AddSeconds(m.CreateTime).ToLocalTime()
+                      .ToString("yyyy年MM月dd日 HH:mm", CultureInfo.InvariantCulture));
+            sb.Append('\n');
+            sb.Append(body);
+            sb.Append('\n');
+            sb.Append('\n');
+        }
+        _lastPullNote = Stamp() + " " + why + "拉取：拿到 " + take.Count + " 条"
+                      + "（" + string.Join("、", hitSids.ToArray()) + "）";
+        return sb.ToString();
+    }
+
+    /// <summary>一条待输出的消息，连同它的会话标签。</summary>
+    private sealed class PullItem
+    {
+        public WxMessage Msg;
+        public string Who;
+    }
+
+    /// <summary>手动拉取：两种读取方式共用入口。</summary>
+    private static string ManualPull()
+    {
+        if (_readMode == "clip") return PullMessages("手动", false);
+        int total, fresh;
+        return MemPull("手动", true, out total, out fresh);
+    }
+
     private static void AutoPullLoop()
     {
         IntPtr hook = SetWinEventHook(EventSystemForeground, EventSystemForeground, IntPtr.Zero,
                                       _foregroundHookProc, 0, 0, WineventOutofcontext);
-        if (hook == IntPtr.Zero)
-        {
-            Log("自动拉取: 挂钩子失败，已停用（手动拉取不受影响）");
-            return;
-        }
-        Log("自动拉取: 已开启（微信因新消息切到前台时触发）");
+        if (hook == IntPtr.Zero) Log("自动拉取: 前台钩子没挂上（不影响轮询）");
+        Log("自动拉取: 已开启（内存读取；会话库有写入就去读一次）");
 
         MSG msg;
+        DateTime lastCheck = DateTime.MinValue;
         while (true)
         {
             // out-of-context 的钩子是把事件当消息投到这个线程的队列里的，
-            // 不抽消息回调永远不会被调用。（第一版就栽在这，什么事件都收不到。）
+            // 不抽消息回调永远不会被调用。
             while (PeekMessage(out msg, IntPtr.Zero, 0, 0, PmRemove))
             {
                 TranslateMessage(ref msg);
                 DispatchMessage(ref msg);
             }
 
-            bool fire = Interlocked.Exchange(ref _autoPullPending, 0) == 1;
-            if (fire && (DateTime.Now - _lastAutoPull).TotalMilliseconds >= 2500)
+            bool forced = Interlocked.Exchange(ref _autoPullPending, 0) == 1;
+            bool due = (DateTime.Now - lastCheck).TotalMilliseconds >= 1500;
+
+            if (_autoPull && (forced || (due && WalChanged())))
             {
-                _lastAutoPull = DateTime.Now;
-                _autoPullQuietUntil = DateTime.Now.AddSeconds(6);   // 别自己触发自己
-                Thread.Sleep(500);                                  // 等消息渲染出来
-
-                EnsureWeChat();
-                string pulled = PullMessages("自动", true);
-                Log(_lastPullNote);
-
-                if (pulled != null && LooksLikeDump(pulled))
+                lastCheck = DateTime.Now;
+                if (DateTime.Now - _lastAutoPull >= TimeSpan.FromMilliseconds(700))
                 {
-                    Broadcast("{\"type\":\"pulled\",\"ok\":true,\"auto\":true,\"len\":" + pulled.Length
-                              + ",\"text\":\"" + JsonEscape(pulled) + "\"}");
+                    _lastAutoPull = DateTime.Now;
+                    _autoPullQuietUntil = DateTime.Now.AddSeconds(4);
+
+                    int total, fresh;
+                    string text = _readMode == "clip"
+                        ? PullMessages("自动", true)
+                        : MemPull("自动", false, out total, out fresh);
+                    Log(_lastPullNote);
+
+                    if (text != null && (_readMode == "clip" ? LooksLikeDump(text) : text.Length > 0))
+                    {
+                        Broadcast("{\"type\":\"pulled\",\"ok\":true,\"auto\":true,\"len\":"
+                                  + text.Length + ",\"text\":\"" + JsonEscape(text) + "\"}");
+                    }
                 }
             }
-            Thread.Sleep(60);
+            Thread.Sleep(120);
         }
     }
 
@@ -1166,7 +1441,7 @@ internal static class Bridge
 
             if (path.StartsWith("/pull"))
             {
-                string pulled = PullMessages("手动", false);
+                string pulled = ManualPull();
                 string body = "{\"ok\":" + (pulled != null ? "true" : "false")
                             + ",\"len\":" + (pulled == null ? 0 : pulled.Length)
                             + ",\"text\":\"" + JsonEscape(pulled == null ? "" : pulled) + "\"}";
@@ -1229,10 +1504,14 @@ internal static class Bridge
                 bool have = _wechatHwnd != IntPtr.Zero;
                 string j = "{\"wechat\":" + (have ? "true" : "false")
                          + ",\"pid\":" + _wechatPid
-                         + ",\"loggedIn\":" + (have && WeChatLooksLoggedIn(_wechatHwnd) ? "true" : "false")
+                         + ",\"loggedIn\":" + ((have && (_readMode == "mem"
+                             ? _lastReadSawSession
+                             : WeChatLooksLoggedIn(_wechatHwnd))) ? "true" : "false")
                          + ",\"size\":\"" + (have ? WindowSizeText(_wechatHwnd) : "-") + "\""
                          + ",\"foreground\":" + (WeChatIsForeground() ? "true" : "false")
                          + ",\"autoPull\":" + (_autoPull ? "true" : "false")
+                         + ",\"read\":\"" + _readMode + "\""
+                         + ",\"session\":\"" + JsonEscape(_sessionId) + "\""
                          + ",\"lastPull\":\"" + JsonEscape(_lastPullNote) + "\""
                          + ",\"clients\":" + Clients.Count + "}";
                 WriteHttp(stream, "200 OK", "application/json; charset=utf-8", Encoding.UTF8.GetBytes(j));
@@ -1373,11 +1652,24 @@ internal static class Bridge
                     // 页面走 WS 而不是 fetch：file:// 页面用 fetch 打本地端口
                     // 有 CORS / 本地网络访问（LNA）的风险，而 WS 早就验证可用。
                     WsSendText(client, "{\"type\":\"pulling\"}");
-                    string pulled = PullMessages("手动", false);
+                    string pulled = ManualPull();
                     WsSendText(client, "{\"type\":\"pulled\",\"ok\":"
                                      + (pulled != null ? "true" : "false")
                                      + ",\"len\":" + (pulled == null ? 0 : pulled.Length)
                                      + ",\"text\":\"" + JsonEscape(pulled == null ? "" : pulled) + "\"}");
+                }
+                else if (type == "session")
+                {
+                    // 锁定要读的会话：1:1 是 wxid_xxx，群是 xxx@chatroom，
+                    // 文件传输助手是 filehelper；空串 = 自动取最近有动静的会话。
+                    object sidObj;
+                    string sid = "";
+                    if (msg.TryGetValue("id", out sidObj) && sidObj != null)
+                        sid = Convert.ToString(sidObj).Trim();
+                    _sessionId = sid;
+                    _msgWatermark.Remove(sid);
+                    Log("读取会话: " + (sid.Length == 0 ? "自动（最近有动静的会话）" : sid));
+                    WsSendText(client, "{\"type\":\"session\",\"id\":\"" + JsonEscape(sid) + "\"}");
                 }
             }
         }
@@ -1407,7 +1699,15 @@ internal static class Bridge
         {
             if (args[i] == "--port" && i + 1 < args.Length) port = int.Parse(args[i + 1], CultureInfo.InvariantCulture);
             if (args[i] == "--no-open") openBrowser = false;
+            if (args[i] == "--read" && i + 1 < args.Length) _readMode = args[i + 1];
+            if (args[i].StartsWith("--read=", StringComparison.Ordinal))
+                _readMode = args[i].Substring(7);
+            if (args[i] == "--session" && i + 1 < args.Length) _sessionId = args[i + 1];
+            if (args[i].StartsWith("--session=", StringComparison.Ordinal))
+                _sessionId = args[i].Substring(10);
         }
+        if (_readMode != "clip") _readMode = "mem";
+        _startedAt = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
 
         // 页面不是必须的：chat.html 用 file:// 直接打开也能连上这个 WebSocket。
         // 所以这里只是"有就顺便托管并自动开浏览器"，没有也照样工作。
@@ -1433,6 +1733,13 @@ internal static class Bridge
             Log("警告: 没找到微信窗口，请先把微信主窗口打开");
         else
             Log("微信窗口已就绪");
+
+        Log("读取方式: " + (_readMode == "mem"
+            ? "内存（读 SQLCipher 解密后的页缓存，不用密钥、不动鼠标）"
+            : "剪贴板（拖长方形 + Ctrl+C，旧路径）"));
+        Log("读取会话: " + (_sessionId.Length == 0
+            ? "自动（取最近有动静的会话）"
+            : _sessionId));
 
         Thread watcher = new Thread(ClipboardWatcher);
         watcher.IsBackground = true;

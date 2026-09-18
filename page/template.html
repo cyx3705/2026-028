@@ -970,7 +970,8 @@ function handleIncoming(text, source){
         handleOne(ln.slice(at), source);
         n++;
       } else if (ln.length <= 500) {
-        addBubble(ln, "in", "剪贴板");
+        // 来源标签随实际读取方式走：桥现在默认从内存读，不再走剪贴板。
+        addBubble(ln, "in", source === "wechat-pull" ? "微信" : "剪贴板");
         n++;
       } else {
         skipped++;

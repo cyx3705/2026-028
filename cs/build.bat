@@ -17,7 +17,7 @@ if not exist "%CSC%" (
 echo Using: %CSC%
 "%CSC%" /nologo /target:exe /platform:anycpu /out:bridge.exe ^
   /r:System.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll ^
-  bridge.cs
+  bridge.cs wxdb.cs
 
 if errorlevel 1 (
   echo.
