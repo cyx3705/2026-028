@@ -300,6 +300,11 @@ internal static class Bridge
     private static long _scanBestArea;
     private static bool _scanLoggedInOnly;
 
+    // 诊断用：窗口是怎么找到的、类名是什么、尺寸多大。换机器排障全靠这几个字。
+    private static string _wechatHow = "（还没找过）";
+    private static string _wechatClass = "";
+    private static string _wechatSize = "";
+
     private static bool ScanWindow(IntPtr h, IntPtr l)
     {
         uint pid;
@@ -326,6 +331,13 @@ internal static class Bridge
     {
         Process[] procs = Process.GetProcessesByName("Weixin");
         if (procs.Length == 0) procs = Process.GetProcessesByName("WeChat");
+        if (procs.Length == 0)
+        {
+            _wechatHow = "没有叫 Weixin / WeChat 的进程";
+            _wechatHwnd = IntPtr.Zero;
+            _wechatPid = 0;
+            return;
+        }
 
         // 快路径：窗口正常可见时 MainWindowHandle 就是它
         foreach (Process p in procs)
@@ -335,6 +347,11 @@ internal static class Bridge
             {
                 _wechatHwnd = h;
                 _wechatPid = p.Id;
+                RECT r0;
+                GetWindowRect(h, out r0);
+                _wechatHow = "MainWindowHandle";
+                _wechatClass = ClassOf(h);
+                _wechatSize = (r0.Right - r0.Left) + "x" + (r0.Bottom - r0.Top);
                 Log("found WeChat: pid=" + p.Id + " class=" + ClassOf(h));
                 return;
             }
@@ -370,6 +387,9 @@ internal static class Bridge
                 _wechatPid = p.Id;
                 RECT r;
                 GetWindowRect(_scanBest, out r);
+                _wechatHow = "枚举进程的顶层窗口（按面积挑，class 里带 Qt）";
+                _wechatClass = ClassOf(_scanBest);
+                _wechatSize = (r.Right - r.Left) + "x" + (r.Bottom - r.Top);
                 Log("found WeChat（窗口被隐藏，走慢路径）: pid=" + p.Id
                     + " class=" + ClassOf(_scanBest)
                     + " 尺寸=" + (r.Right - r.Left) + "x" + (r.Bottom - r.Top));
@@ -377,6 +397,7 @@ internal static class Bridge
             }
         }
 
+        _wechatHow = "找到了 Weixin 进程，但它的顶层窗口里没有带 Qt 的";
         _wechatHwnd = IntPtr.Zero;
         _wechatPid = 0;
     }
@@ -978,7 +999,7 @@ internal static class Bridge
         {
             EnsureWeChat();
             sb.Append("微信窗口: ");
-            sb.Append(_wechatPid == 0 ? "没找到（微信没开 / 窗口类名变了）"
+            sb.Append(_wechatPid == 0 ? "没找到（微信没开 / 进程名不叫 Weixin）"
                                       : "pid=" + _wechatPid);
             if (_wechatPid != 0)
             {
@@ -988,9 +1009,26 @@ internal static class Bridge
                     Process wp = Process.GetProcessById((int)_wechatPid);
                     sb.Append("（").Append(wp.MainModule.FileVersionInfo.FileVersion)
                       .Append("）");
+                    sb.Append("\r\n  找到方式: ").Append(_wechatHow)
+                      .Append("；窗口类名: ").Append(_wechatClass)
+                      .Append("；尺寸: ").Append(_wechatSize);
+                    sb.Append("\r\n  程序路径: ").Append(wp.MainModule.FileName);
                 }
-                catch (Exception vex) { sb.Append("（版本读不到: ").Append(vex.Message).Append("）"); }
+                catch (Exception vex)
+                {
+                    sb.Append("（进程信息读不到: ").Append(vex.Message).Append("）");
+                    sb.Append("\r\n  找到方式: ").Append(_wechatHow);
+                }
             }
+            else
+            {
+                sb.Append("\r\n  找到方式: ").Append(_wechatHow);
+            }
+            string walSrc = FindSessionWal();
+            sb.Append("\r\n数据目录（只用来判断有没有新消息，读不到也照样能读内存）: ");
+            sb.Append(walSrc == null
+                ? "没找到 —— 微信的文件目录被挪过？现在退化成每轮都读一次（能用，稍费 CPU）"
+                : (walSrc.Split('|').Length + " 个 db-wal 文件在盯着"));
             sb.Append("；读取方式: ").Append(_readMode);
             sb.Append("；绑定: ").Append(_msgTable.Length > 0 ? _msgTable
                         : (_sessionId.Length > 0 ? _sessionId : "自动"));
@@ -998,6 +1036,9 @@ internal static class Bridge
             if (_wechatPid != 0 && _readMode == "mem")
             {
                 WxSnapshot snap = WxSnapshot.CaptureAuto(_wechatPid);
+                if (snap.Img == null)
+                    sb.Append("\r\n内存读取: 失败（OpenProcess 被拒？换成和微信同一个用户跑，"
+                            + "或用管理员身份；也可能是杀软拦了）");
                 sb.Append("\r\n").Append(snap.Diagnostics());
                 List<string> mt = snap.MessageTables();
                 sb.Append("\r\n消息表可读情况: ");

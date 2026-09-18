@@ -509,6 +509,10 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     check($("diagBox").hidden === false, "诊断面板展开");
     check(String($("diagBox").textContent).indexOf("会话行 73") >= 0,
           "诊断内容原样贴在面板里", String($("diagBox").textContent));
+    check(String($("diagBox").textContent).indexOf("桥地址") >= 0,
+          "诊断里带上了 页面/桥地址 这一段（哪台机器在识别，一眼看清）");
+    check(String($("diagBox").textContent).indexOf("本机回环") >= 0,
+          "并说清 127.0.0.1 意味着桥必须在这台机器上跑");
 
     // 一个都识别不出来时：面板报错 + 自动去要诊断
     const sentBeforeEmpty = sock.sent.length;

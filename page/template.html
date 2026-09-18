@@ -807,6 +807,7 @@ var Bridge = (function(){
     listSessions: listSessions,
     bind: bind,
     diag: diag,
+    url: function(){ return WS_URL; },
     isConnected: function(){ return connected; },
     onText: function(f){ onText = f; },
     onState: function(f){ onState = f; }
@@ -1206,7 +1207,7 @@ Bridge.onState(function(kind, arg){
     var box = $("diagBox");
     if (box) {
       box.hidden = false;
-      box.textContent = (arg && arg.text) ? arg.text : "（桥没给内容）";
+      box.textContent = diagHeader() + "\r\n" + ((arg && arg.text) ? arg.text : "（桥没给内容）");
     }
     beacon("diag-shown", "len=" + ((arg && arg.text) ? arg.text.length : 0));
   }
@@ -1661,6 +1662,22 @@ function pullRecent(){
   }
 }
 
+/* ---------------------------------------------------------------------
+ * 本机依赖：一眼看清"识别的是哪台机器上的微信"
+ *
+ * 页面自己读不到微信，一个字节都读不到 —— 会话识别、拉取、发送全靠桥。
+ * 桥在 127.0.0.1 上，所以**桥在哪台机器，识别的就是那台机器上登录的微信**。
+ * 把这句话连同实际地址一起写进诊断，换机器排障时不用猜。
+ * ------------------------------------------------------------------- */
+function diagHeader(){
+  var here = (typeof location !== "undefined" && location.href) ? location.href : "?";
+  var ws = Bridge.url ? Bridge.url() : "?";
+  var loopback = /(^|\/\/)(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(ws);
+  return "页面: " + here
+       + "\r\n桥地址: " + ws + (loopback ? "（本机回环 → 桥必须在这台机器上跑）"
+                                        : "（跟着页面走 → 桥要在页面服务器那台机器上跑）")
+       + "\r\n识别的是：跑桥的那台机器上**当前登录的微信**；页面本身读不到微信。";
+}
 /**
  * 会话选择：点顶栏 🔗 胶囊展开，列出最近有动静的 3–5 个对话，
  * 每条拿"它最新那条消息"当身份。
