@@ -759,9 +759,11 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     check(installer.indexOf("bridge preflight blocked installation") >= 0,
           "安装脚本包含旧 bridge 进程检测");
     check(installer.indexOf("Get-Process bridge") >= 0
-          && installer.indexOf("Get-NetTCPConnection -LocalPort 8765") >= 0,
+          && installer.indexOf("netstat -ano") >= 0
+          && installer.indexOf(":8765") >= 0,
           "安装脚本同时检查 bridge 进程和 8765 端口");
-    check(installer.indexOf("if errorlevel 1") >= 0,
+    check(installer.indexOf("if errorlevel 1 (\r\n  echo   [X] unpack") >= 0
+          && installer.indexOf("  exit /b 1\r\n)") >= 0,
           "安装脚本会在解包失败时立即停止");
   }
 
