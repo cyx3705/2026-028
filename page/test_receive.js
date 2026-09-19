@@ -10,7 +10,7 @@
  * 走的是和"对面在微信里 Ctrl+C"完全相同的入口。
  * 断言的是桩 DOM 上的真实状态（药丸文字/class、输入框 disabled、日志文本）。
  *
- * 跑法：node test_receive.js
+ * 跑法：node test_receive.js [可选 HTML 路径]
  */
 "use strict";
 
@@ -40,20 +40,26 @@ function makeEl(tag){
     children: [],
     scrollTop: 0,
     scrollHeight: 0,
+    hidden: false,
+    _attrs: {},
     appendChild(c){ el.children.push(c); return c; },
     removeChild(c){ el.children = el.children.filter(x => x !== c); },
     remove(){},
-    focus(){},
+    focus(){ if (globalThis.document) globalThis.document.activeElement = el; },
     select(){},
     /* 记下监听器，click() 真去调 —— 否则按钮上的逻辑在测试里根本进不去 */
     addEventListener(type, fn){ (el._on[type] = el._on[type] || []).push(fn); },
     click(){
       const ev = { target: el, stopPropagation(){}, preventDefault(){} };
+      el.focus();
       (el._on.click || []).forEach(f => f.call(el, ev));
     },
     querySelector(){ return null; },
     querySelectorAll(){ return []; },
-    setAttribute(){},
+    setAttribute(k, v){ el._attrs[k] = String(v); },
+    getAttribute(k){ return Object.prototype.hasOwnProperty.call(el._attrs, k) ? el._attrs[k] : null; },
+    removeAttribute(k){ delete el._attrs[k]; },
+    closest(){ return null; },
     getBoundingClientRect(){ return { top:0, left:0, width:100, height:20 }; },
     _on: {},
   };
@@ -75,24 +81,42 @@ function $(id){
   return elements[id];
 }
 
+const documentListeners = {};
 globalThis.document = {
   body: makeEl("body"),
   getElementById: (id) => $(id),
   querySelector: () => null,
   querySelectorAll: () => [],
   createElement: (t) => makeEl(t),
-  addEventListener: () => {},
+  activeElement: null,
+  addEventListener: (type, fn) => { (documentListeners[type] = documentListeners[type] || []).push(fn); },
+  dispatchEvent: (ev) => { (documentListeners[ev.type] || []).forEach(fn => fn.call(globalThis.document, ev)); },
+  execCommand: () => false,
 };
 
-// Node 24 自带只读的 globalThis.navigator / location，赋不上就跳过 ——
-// 页面只在 copyText 里用 navigator.clipboard，而 Node 的 navigator 没有它，
-// 效果跟"浏览器里没有剪贴板 API"一样，正是我们要的分支
+// 给页面提供可控的 navigator/location；剪贴板桩在下面按场景切换成功、拒绝和失败。
 for (const [k, v] of [["navigator", { clipboard: undefined }],
                       ["location", { protocol: "file:", host: "", href: "file:///chat.html" }]]) {
-  try { globalThis[k] = v; } catch (e) { /* 只读，沿用 Node 自带的 */ }
+  try { Object.defineProperty(globalThis, k, { value:v, writable:true, configurable:true }); }
+  catch (e) { try { globalThis[k] = v; } catch (e2) { /* 保留运行时默认值 */ } }
 }
-try { globalThis.navigator = globalThis.navigator; } catch (e) {}
 globalThis.alert = () => {};
+
+// 确认/复制路径测试用的可控剪贴板桩。
+const clipboardState = { mode:"none", writes:[], errorName:"NotAllowedError" };
+globalThis.__clipboardState = clipboardState;
+globalThis.navigator.clipboard = {
+  writeText: (text) => {
+    clipboardState.writes.push(String(text));
+    if (clipboardState.mode === "reject") {
+      const e = new Error("clipboard permission denied");
+      e.name = clipboardState.errorName;
+      return Promise.reject(e);
+    }
+    if (clipboardState.mode === "throw") throw new Error("clipboard unavailable");
+    return Promise.resolve();
+  },
+};
 
 // WebSocket 桩：连不上也不回调，于是 Bridge 保持"未连接"且不排重试 —— 结果确定。
 // 实例收集起来（__sockets），需要时把 readyState 打开、手动喂一帧进来，
@@ -101,7 +125,8 @@ globalThis.__sockets = [];
 globalThis.WebSocket = function(){
   this.readyState = 0;
   this.sent = [];
-  this.send = (t) => { this.sent.push(String(t)); };
+  this.throwOnSend = false;
+  this.send = (t) => { if (this.throwOnSend) throw new Error("socket closed"); this.sent.push(String(t)); };
   this.close = () => {};
   globalThis.__sockets.push(this);
 };
@@ -122,7 +147,10 @@ globalThis.localStorage = {
  * 加载页面脚本
  * ------------------------------------------------------------------- */
 
-const html = fs.readFileSync(path.join(__dirname, "chat.html"), "utf8");
+const htmlPath = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(__dirname, "chat.html");
+const html = fs.readFileSync(htmlPath, "utf8");
 const m = html.match(/<script>([\s\S]*?)<\/script>/);
 if (!m) { console.error("找不到 <script>"); process.exit(1); }
 
@@ -131,6 +159,7 @@ let P;
 eval(m[1] + `
 ;globalThis.__P = {
   Crypto: Crypto,
+  Bridge: Bridge,
   handleIncoming: handleIncoming,
   recvManual: recvManual,
   parseWeChatDump: parseWeChatDump,
@@ -142,6 +171,14 @@ eval(m[1] + `
   b64uEncode: b64uEncode,
   getMyKeySent: function(){ return myKeySent; },
   sendViaBridge: sendViaBridge,
+  copyText: copyText,
+  openConfirm: openConfirm,
+  finishConfirm: finishConfirm,
+  cancelConfirm: cancelConfirm,
+  submitConfirm: submitConfirm,
+  getConfirmState: function(){ return confirmState; },
+  showPasteFallback: showPasteFallback,
+  buildInstaller: buildInstaller,
   isMyEcho: isMyEcho,
   $: $,
 };
@@ -551,6 +588,210 @@ const settle = () => new Promise(r => setTimeout(r, 60));
     const added = $(("log")).children.slice(nBeforePhone).map(c => String(c.textContent));
     check(added.every(t => t.indexOf("忽略（回声）") < 0),
           "手机发的那条不走回声分支（回路测试不受影响）", JSON.stringify(added));
+  }
+
+  // ---------- 公钥发送确认层 ----------
+  console.log("\n--- 公钥发送确认层 ---");
+  {
+    const sock = globalThis.__sockets[globalThis.__sockets.length - 1];
+    sock.readyState = 1;
+    if (sock.onopen) sock.onopen();
+    const clip = globalThis.__clipboardState;
+    clip.mode = "none";
+    clip.writes.length = 0;
+    document.execCommand = () => false;
+    $("popKey").classList.remove("show");
+    $("confirmModal").classList.remove("show");
+
+    // 第一次点击只打开面板和确认框；确认前绝不产生帧或剪贴板写入。
+    const frame0 = sock.sent.length;
+    $("pillKey").click();
+    await settle();
+    check($("popKey").classList.contains("show"), "点「密钥」仍会打开密钥面板");
+    check($("confirmModal").classList.contains("show"), "点「密钥」先打开页面内确认框");
+    check($("confirmTitle").textContent === "确认发送公钥", "确认框标题明确为发送公钥");
+    check(String($("confirmBody").textContent).indexOf("当前窗口中获得焦点的会话") >= 0,
+          "确认正文说明发送到当前微信焦点会话");
+    check(String($("confirmBody").textContent).indexOf(P.Crypto.myFingerprint()) >= 0,
+          "确认正文只展示本机公钥指纹");
+    check($("confirmSubmit").textContent === "确认发送", "发送确认按钮文案正确");
+    check(document.activeElement === $("confirmCancel"), "确认框默认焦点在取消");
+    check(sock.sent.length === frame0, "确认前没有 WebSocket 帧");
+    check(clip.writes.length === 0, "确认前没有剪贴板写入");
+
+    const fpBeforeCancel = P.Crypto.myFingerprint();
+    $("confirmCancel").click();
+    await settle();
+    check(!$("confirmModal").classList.contains("show"), "取消后确认框关闭");
+    check(sock.sent.length === frame0 && clip.writes.length === 0,
+          "取消后 WebSocket 和剪贴板均无副作用");
+    check(P.getMyKeySent() === false, "取消不改变 myKeySent");
+    check(P.Crypto.myFingerprint() === fpBeforeCancel, "取消保留当前指纹");
+    check(document.activeElement === $("pillKey"), "取消后焦点恢复到原入口");
+
+    // Escape 与遮罩关闭都必须走同一取消路径。
+    $("pillKey").click(); // 关掉仍打开的面板
+    $("pillKey").click();
+    await settle();
+    document.dispatchEvent({ type:"keydown", key:"Escape", preventDefault(){} });
+    check(!$("confirmModal").classList.contains("show"), "Escape 取消确认");
+    check(sock.sent.length === frame0 && clip.writes.length === 0,
+          "Escape 取消没有发送或复制");
+
+    $("pillKey").click(); // 面板当前仍开，先关
+    $("pillKey").click();
+    await settle();
+    $("confirmModal").click();
+    check(!$("confirmModal").classList.contains("show"), "点击确认遮罩取消");
+    check(sock.sent.length === frame0 && clip.writes.length === 0,
+          "遮罩取消没有发送或复制");
+
+    // 快速重复点击只能保留一个请求。
+    $("pillKey").click(); // 关面板
+    $("pillKey").click();
+    $("pillKey").click();
+    await settle();
+    check($("confirmModal").classList.contains("show"), "快速重复点击仍只有一个确认框");
+    $("confirmCancel").click();
+    await settle();
+
+    // 顶栏在线确认：恰好一条原协议 send 帧，不走剪贴板。
+    clip.mode = "none";
+    clip.writes.length = 0;
+    const onlineFrame0 = sock.sent.length;
+    $("pillKey").click(); // 关掉上一次仍打开的面板
+    $("pillKey").click();
+    await settle();
+    check($("confirmModal").classList.contains("show"), "顶栏密钥按钮打开确认框");
+    $("confirmSubmit").click();
+    check($("confirmSubmit").disabled === true, "提交后立即禁用确认按钮");
+    await settle();
+    check(!$("confirmModal").classList.contains("show"), "在线发送完成后确认框关闭");
+    check(sock.sent.length === onlineFrame0 + 1, "在线确认恰好产生一条公钥发送帧",
+          JSON.stringify(sock.sent.slice(-1)));
+    check(clip.writes.length === 0, "在线发送成功不写剪贴板");
+    check(P.getMyKeySent() === true, "在线发送成功记录 myKeySent");
+
+    // 面板里的「复制我的公钥」即使桥在线也只写剪贴板，不发送 WebSocket 帧。
+    clip.writes.length = 0;
+    const copyFrame0 = sock.sent.length;
+    const sentBeforeExplicitCopy = P.getMyKeySent();
+    $("btnCopyKey").click();
+    await settle();
+    check($("confirmModal").classList.contains("show"), "复制公钥按钮也要求确认");
+    $("confirmSubmit").click();
+    await settle();
+    check(sock.sent.length === copyFrame0, "复制公钥确认不产生 WebSocket 帧");
+    check(clip.writes.length === 1, "复制公钥确认只写剪贴板");
+    check(P.getMyKeySent() === sentBeforeExplicitCopy, "单纯复制不改变 myKeySent");
+
+    // 在线但 WebSocket 在提交瞬间失败：复制兜底且不伪报成功帧。
+    sock.throwOnSend = true;
+    clip.mode = "none";
+    clip.writes.length = 0;
+    const failedFrame0 = sock.sent.length;
+    $("pillKey").click(); // 关掉复制完成后仍打开的面板
+    $("pillKey").click();
+    await settle();
+    $("confirmSubmit").click();
+    await settle();
+    check(sock.sent.length === failedFrame0, "WebSocket 发送失败没有伪造发送帧");
+    check(clip.writes.length === 1, "WebSocket 发送失败走剪贴板兜底");
+    check(logHas("桥发送失败，公钥已复制"), "WebSocket 失败提示明确要求手动粘贴");
+    sock.throwOnSend = false;
+
+    // 桥离线：确认后复制成功。
+    sock.readyState = 0;
+    if (sock.onclose) sock.onclose();
+    clip.mode = "none";
+    clip.writes.length = 0;
+    $("pillKey").click(); // 关闭面板
+    $("pillKey").click();
+    await settle();
+    $("confirmSubmit").click();
+    await settle();
+    check(clip.writes.length === 1, "桥离线确认后复制公钥");
+    check(logHas("桥离线，公钥已复制"), "离线复制成功提示目标和手动粘贴");
+
+    // API 拒绝但 execCommand 成功，以及两条路径都失败。
+    clip.mode = "reject";
+    clip.writes.length = 0;
+    document.execCommand = () => true;
+    $("btnCopyKey").click();
+    await settle();
+    $("confirmSubmit").click();
+    await settle();
+    check(P.copyText.lastMethod === "execCommand", "剪贴板 API 拒绝后尝试隐藏 textarea 兜底");
+    check($("keyCopyFallback").classList.contains("show") === false,
+          "兜底复制成功时不显示失败入口");
+
+    const sentBeforeCopyFail = P.getMyKeySent();
+    document.execCommand = () => false;
+    $("btnCopyKey").click();
+    await settle();
+    $("confirmSubmit").click();
+    await settle();
+    check(P.copyText.lastMethod === "execCommand" && P.copyText.lastError,
+          "API 和 textarea 都失败时返回失败结果");
+    check($("keyCopyFallback").classList.contains("show"), "复制失败显示手动复制入口");
+    check(String($("keyCopyError").textContent).indexOf("Edge") >= 0,
+          "复制失败提示 Edge 权限和手动复制步骤");
+    check(P.getMyKeySent() === sentBeforeCopyFail, "复制失败不改变 myKeySent");
+
+    // 安装脚本手动复制弹层：API 拒绝状态必须留在 pasteMsg，兼容路径仍可复制。
+    clip.mode = "reject";
+    document.execCommand = () => false;
+    P.showPasteFallback();
+    await settle();
+    check($("pasteModal").classList.contains("show"), "手动保存弹层仍能打开");
+    check(String($("pasteMsg").textContent).indexOf("NotAllowedError") >= 0,
+          "安装脚本 API 拒绝状态显示在 pasteMsg");
+    document.execCommand = () => true;
+    $("btnCopyPaste").click();
+    await settle();
+    check(String($("pasteMsg").textContent).indexOf("已复制") >= 0,
+          "安装脚本兼容复制成功有明确提示");
+    $("btnClosePaste").click();
+    check(!$('pasteModal').classList.contains("show"), "安装脚本弹层可关闭");
+
+    // 安装脚本在写 bridge.exe 前识别旧进程，避免覆盖锁定文件后继续误启动。
+    const installer = P.buildInstaller();
+    check(installer.indexOf("bridge preflight blocked installation") >= 0,
+          "安装脚本包含旧 bridge 进程检测");
+    check(installer.indexOf("Get-Process bridge") >= 0
+          && installer.indexOf("Get-NetTCPConnection -LocalPort 8765") >= 0,
+          "安装脚本同时检查 bridge 进程和 8765 端口");
+    check(installer.indexOf("if errorlevel 1") >= 0,
+          "安装脚本会在解包失败时立即停止");
+  }
+
+  // ---------- 重置密钥确认 ----------
+  console.log("\n--- 重置密钥确认 ---");
+  {
+    const fp0 = P.Crypto.myFingerprint();
+    const sent0 = P.getMyKeySent();
+    $("btnReset").click();
+    await settle();
+    check($("confirmModal").classList.contains("show"), "重置密钥先打开确认框");
+    check($("confirmSubmit").textContent === "重置密钥", "重置确认按钮文案正确");
+    check(String($("confirmBody").textContent).indexOf("旧配对立即失效") >= 0,
+          "重置确认说明旧配对失效");
+    check(String($("confirmBody").textContent).indexOf(fp0) >= 0,
+          "重置确认展示当前指纹");
+    $("confirmCancel").click();
+    await settle();
+    check(P.Crypto.myFingerprint() === fp0 && P.getMyKeySent() === sent0,
+          "取消重置保留会话和指纹");
+
+    $("btnReset").click();
+    await settle();
+    $("confirmSubmit").click();
+    await settle();
+    check(!$("confirmModal").classList.contains("show"), "确认重置后确认框关闭");
+    check(P.Crypto.myFingerprint() !== fp0, "确认重置后本机指纹更新");
+    check(P.Crypto.hasPeer() === false, "确认重置清空对方公钥");
+    check($("input").disabled === true, "确认重置后输入框重新禁用");
+    check(P.getMyKeySent() === false, "确认重置清除 myKeySent");
   }
 
   console.log("");

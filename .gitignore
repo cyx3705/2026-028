@@ -7,6 +7,9 @@ __pycache__/
 # C# 桥的编译产物（cs\build.bat 生成，不入库）
 cs/bridge.exe
 
+# 内嵌预编译桥的本地单文件发布页（由 page\build_page.py --standalone 生成）
+dist/
+
 # 诊断小工具 wxread 与它的输出（用来看"内存里到底读得到什么"）
 cs/wxread.exe
 cs/*.txt

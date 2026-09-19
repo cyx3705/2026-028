@@ -71,6 +71,10 @@
   .modal .box{background:var(--panel2);border:1px solid var(--line);border-radius:12px;
               max-width:660px;width:100%;max-height:calc(100vh - 44px);overflow:auto;
               padding:18px 20px;box-shadow:0 18px 60px rgba(0,0,0,.65)}
+  .modal .close{position:absolute;top:10px;right:12px;background:none;border:0;color:var(--dim);
+                cursor:pointer;font-size:16px;padding:0 4px;line-height:1}
+  .modal .close:hover{color:var(--text)}
+  .modal .close:disabled{opacity:.45;cursor:not-allowed}
   .modal h3{margin:0 0 10px;font-size:14px;font-weight:600}
   .modal ol{margin:0 0 12px;padding-left:20px;color:var(--dim);font-size:12px;line-height:1.95}
   .modal ol b{color:var(--text)}
@@ -81,6 +85,18 @@
                   font:11px/1.5 ui-monospace,Consolas,monospace;resize:vertical;
                   white-space:pre;overflow:auto}
   .modal .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+
+  /* ---------- 发送/重置确认 ---------- */
+  #confirmModal{z-index:70}
+  #confirmModal .box{max-width:520px;position:relative}
+  #confirmModal .confirm-body{margin:0;color:var(--dim);font-size:13px;line-height:1.75;
+                              white-space:pre-line}
+  #confirmModal .confirm-note{margin:10px 0 0;color:var(--dim);font-size:11px;line-height:1.6}
+  #keyCopyFallback{display:none;margin:10px 0 0}
+  #keyCopyFallback.show{display:block}
+  #keyManualCopy{width:100%;height:74px;background:#0b0d12;color:var(--dim);
+                 border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+                 font:11px/1.45 ui-monospace,Consolas,monospace;resize:vertical}
 
   .st{display:flex;align-items:center;gap:7px;font-size:12px;margin-bottom:10px}
   .st .b{width:7px;height:7px;border-radius:50%;background:var(--bad);flex:none}
@@ -178,19 +194,21 @@
   <h3>🌉 桥</h3>
   <div class="st"><span class="b" id="bridgeDot"></span><span id="bridgeText">检查中…</span></div>
   <p>
-    桥是一个 <strong>20 KB 的小程序</strong>，用 Windows 自带的 C# 编译器现场编译。
-    <strong>不需要 Python / Node / .NET SDK，也不用联网下载任何东西。</strong>
+    桥是一个 <strong>Windows 小程序</strong>。<strong id="bridgeModeDescription">页面内含桥源码，安装器会现场编译。</strong>
     它负责把密文写进剪贴板、切到微信、按 <code>Ctrl+V</code> <code>Enter</code>，
     同时监听剪贴板，你在微信里 <code>Ctrl+C</code> 就能自动收。
   </p>
   <div class="row">
-    <button class="act" id="btnDownload">⬇ 下载安装桥</button>
+    <button class="act" id="btnDownload">⬇ 快速下载</button>
+    <button class="act ghost" id="btnSaveInstall">选择保存位置</button>
     <button class="act ghost" id="btnShowSrc">另存 bridge.cs</button>
     <button class="act ghost" id="btnCopyInstall">📋 手动保存（万能）</button>
     <button class="act ghost" id="btnTestSend">📤 发送测试消息</button>
   </div>
   <p class="fine">
-    存成 <code>install-bridge.bat</code>，<strong>双击运行</strong>即可，它会自己编译并启动。<br>
+    快速下载会把 <code>install-bridge.bat</code> 放进 Edge 下载栏；点下载栏里的文件一次即可运行。<br>
+    也可用「选择保存位置」指定目录，保存后再双击运行；脚本会释放并启动桥。<br>
+    <span id="bridgeBuildDescription">源码安装版会调用 Windows 自带 C# 编译器。</span><br>
     首次运行 Windows 可能提示"已保护你的电脑"，点
     <strong>更多信息 → 仍要运行</strong>（脚本文件的正常提示）。<br>
     <span style="color:var(--dim)">「下载」走的是浏览器下载管道，而 <code>.bat</code> 属于危险文件类型，
@@ -206,10 +224,15 @@
   <h3>🔑 会话密钥</h3>
   <div class="st"><span class="b" id="keyDot"></span><span id="keyText">未就绪</span></div>
   <p id="keyHint">
-    点顶栏的「密钥」就是<strong>把公钥发出去</strong>。双方各点一次，就能各自算出同一个会话密钥。
+    点顶栏的「密钥」会先打开确认框；确认后才<strong>发送或复制公钥</strong>。双方各点一次，就能各自算出同一个会话密钥。
     <strong>私钥永远不出本机。</strong>
   </p>
   <span class="finger" id="keyFinger" style="display:none"></span>
+  <div id="keyCopyFallback">
+    <p class="fine" id="keyCopyError" style="color:var(--warn);margin:0 0 6px"></p>
+    <textarea id="keyManualCopy" readonly spellcheck="false" aria-label="手动复制公钥"></textarea>
+    <button class="act ghost" id="btnSelectKey" type="button" style="margin-top:6px">选择公钥后手动复制</button>
+  </div>
   <div class="row">
     <button class="act ghost" id="btnCopyKey">复制我的公钥</button>
     <button class="act ghost" id="btnReset">重置密钥</button>
@@ -360,7 +383,7 @@
 <!-- 没装桥时的大横幅：不依赖弹窗，永远在视口里，一眼就能看到 -->
 <div id="banner">
   <span class="txt">还没装桥 —— 装好后页面会自动连上</span>
-  <button class="act" id="btnInstallBig">⬇ 下载安装桥</button>
+  <button class="act" id="btnInstallBig">⬇ 快速下载</button>
   <button class="act ghost" id="btnPasteBig">📋 手动保存</button>
   <span class="txt" style="opacity:.7;font-size:11px">（也可以点右上角的「桥」看详细说明）</span>
 </div>
@@ -387,6 +410,21 @@
   </div>
 </div>
 
+<!-- 发送公钥/重置身份的统一确认层。默认焦点在取消，避免回车误触。 -->
+<div class="modal" id="confirmModal" role="dialog" aria-modal="true"
+     aria-labelledby="confirmTitle" aria-describedby="confirmBody" tabindex="-1">
+  <div class="box">
+    <button class="close" id="confirmClose" type="button" aria-label="取消">×</button>
+    <h3 id="confirmTitle">请确认操作</h3>
+    <p class="confirm-body" id="confirmBody"></p>
+    <p class="confirm-note" id="confirmNote"></p>
+    <div class="row">
+      <button class="act ghost" id="confirmCancel" type="button">取消</button>
+      <button class="act" id="confirmSubmit" type="button">确认发送</button>
+    </div>
+  </div>
+</div>
+
 <div id="log">
   <div class="empty" id="emptyState">
     微信在这里只是一条<strong>不可信管道</strong><br>
@@ -407,6 +445,8 @@
  * ===================================================================== */
 var BRIDGE_B64 = "__BRIDGE_B64__";
 var WXDB_B64 = "__WXDB_B64__";
+/* --standalone 构建才填充；普通 chat.html 保持为空，不把 EXE 带进仓库。 */
+var BRIDGE_EXE_B64 = "__BRIDGE_EXE_B64__";
 
 /* 构建戳。显示在弹窗底部，用来判断"浏览器里跑的是哪一版"。
  * 踩过的坑：磁盘上 chat.html 早就更新了，但打开的标签页还是旧代码，
@@ -460,6 +500,7 @@ var PREFIX_MSG = "E2E1-M.";
 var Crypto = (function(){
   var STORE = "e2e1.identity.jwk";
   var myPriv = null, myPub = null, myPubRaw = null;
+  var identityPromise = null;
   var peerPubRaw = null;
   var sendKey = null, recvKey = null;
   var sendCtr = 0, recvCtrMax = -1;
@@ -480,39 +521,57 @@ var Crypto = (function(){
 
   function ensureIdentity(){
     if (myPriv) return Promise.resolve();
-    var saved = loadIdentity();
-    if (saved) {
-      return crypto.subtle.importKey("jwk", saved.privateKey,
-                 {name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
-        .then(function(priv){
-          myPriv = priv;
-          return crypto.subtle.importKey("jwk", saved.publicKey,
-                   {name:"ECDH", namedCurve:"P-256"}, true, []);
+    if (identityPromise) return identityPromise;
+
+    function createIdentity(){
+      var saved = loadIdentity();
+      if (saved) {
+        return crypto.subtle.importKey("jwk", saved.privateKey,
+                   {name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
+          .then(function(priv){
+            myPriv = priv;
+            return crypto.subtle.importKey("jwk", saved.publicKey,
+                     {name:"ECDH", namedCurve:"P-256"}, true, []);
+          })
+          .then(function(pub){
+            myPub = pub;
+            return crypto.subtle.exportKey("raw", pub);
+          })
+          .then(function(raw){ myPubRaw = new Uint8Array(raw); })
+          .catch(function(){
+            localStorage.removeItem(STORE);
+            myPriv = myPub = myPubRaw = null;
+            return createIdentity();
+          });
+      }
+      return crypto.subtle.generateKey({name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
+        .then(function(pair){
+          myPriv = pair.privateKey; myPub = pair.publicKey;
+          return Promise.all([
+            crypto.subtle.exportKey("jwk", pair.privateKey),
+            crypto.subtle.exportKey("jwk", pair.publicKey),
+            crypto.subtle.exportKey("raw", pair.publicKey)
+          ]);
         })
-        .then(function(pub){
-          myPub = pub;
-          return crypto.subtle.exportKey("raw", pub);
-        })
-        .then(function(raw){ myPubRaw = new Uint8Array(raw); })
-        .catch(function(){ localStorage.removeItem(STORE); return ensureIdentity(); });
+        .then(function(r){
+          saveIdentity({ privateKey: r[0], publicKey: r[1] });
+          myPubRaw = new Uint8Array(r[2]);
+        });
     }
-    return crypto.subtle.generateKey({name:"ECDH", namedCurve:"P-256"}, true, ["deriveBits"])
-      .then(function(pair){
-        myPriv = pair.privateKey; myPub = pair.publicKey;
-        return Promise.all([
-          crypto.subtle.exportKey("jwk", pair.privateKey),
-          crypto.subtle.exportKey("jwk", pair.publicKey),
-          crypto.subtle.exportKey("raw", pair.publicKey)
-        ]);
-      })
-      .then(function(r){
-        saveIdentity({ privateKey: r[0], publicKey: r[1] });
-        myPubRaw = new Uint8Array(r[2]);
-      });
+
+    identityPromise = createIdentity().then(function(v){
+      identityPromise = null;
+      return v;
+    }, function(e){
+      identityPromise = null;
+      throw e;
+    });
+    return identityPromise;
   }
 
   function resetIdentity(){
     localStorage.removeItem(STORE);
+    identityPromise = null;
     myPriv = myPub = myPubRaw = peerPubRaw = sendKey = recvKey = null;
     sendCtr = 0; recvCtrMax = -1;
     sendRaw = recvRaw = null; testKeys = null; peerCtr = 0;
@@ -748,8 +807,13 @@ var Bridge = (function(){
 
   function send(text){
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify({ type:"send", text: text }));
-    return true;
+    try {
+      ws.send(JSON.stringify({ type:"send", text: text }));
+      return true;
+    } catch (e) {
+      /* readyState 可能在检查后瞬间变化；调用方会走剪贴板兜底。 */
+      return false;
+    }
   }
 
   /**
@@ -855,6 +919,152 @@ function addBubble(text, dir, meta){
   $("log").scrollTop = $("log").scrollHeight;
 }
 
+/* ---------- 统一确认层 ---------- */
+/*
+ * 发送公钥和重置身份都经过这里。状态放在页面脚本里而不是依赖原生
+ * confirm()，这样 file:// 页面也能显示当前会话、指纹和实际路径，并且
+ * 可以在异步复制完成前锁住操作按钮。
+ */
+var confirmState = null;
+
+function focusElement(el){
+  try { if (el && typeof el.focus === "function") el.focus(); } catch (e) {}
+}
+
+function confirmBeacon(tag, kind, status, extra){
+  var x = "kind=" + (kind || "unknown") + " status=" + (status || "unknown");
+  if (extra) x += " " + extra;
+  beacon(tag, x);
+}
+
+function finishConfirm(result){
+  var st = confirmState;
+  if (!st) return false;
+  /* 提交中的确认只能由 submit 的异步收尾关闭，避免遮罩/ESC 抢跑。 */
+  if (st.busy && !(result && result.__confirmAction)) return false;
+
+  confirmState = null;
+  var modal = $("confirmModal");
+  var submit = $("confirmSubmit");
+  var cancel = $("confirmCancel");
+  var close = $("confirmClose");
+  modal.classList.remove("show");
+  modal.classList.remove("confirm-busy");
+  modal.removeAttribute && modal.removeAttribute("aria-busy");
+  submit.disabled = false;
+  cancel.disabled = false;
+  close.disabled = false;
+
+  var out = (result && typeof result === "object")
+           ? result : { confirmed:false, ok:!!result };
+  if (out.__confirmAction) delete out.__confirmAction;
+  if (st.resolve) st.resolve(out);
+  focusElement(st.previousFocus);
+  return true;
+}
+
+function cancelConfirm(reason){
+  var st = confirmState;
+  if (!st || st.busy) return false;
+  confirmBeacon("confirm-cancel", st.kind, "cancelled", "reason=" + (reason || "button"));
+  if (st.kind === "reset") {
+    confirmBeacon("reset-confirm", "reset", "cancelled", "reason=" + (reason || "button"));
+  }
+  return finishConfirm({ confirmed:false, ok:false });
+}
+
+function submitConfirm(){
+  var st = confirmState;
+  if (!st || st.busy) return false;
+  st.busy = true;
+  var submit = $("confirmSubmit");
+  var cancel = $("confirmCancel");
+  var close = $("confirmClose");
+  submit.disabled = true;
+  cancel.disabled = true;
+  close.disabled = true;
+  $("confirmModal").classList.add("confirm-busy");
+  $("confirmModal").setAttribute && $("confirmModal").setAttribute("aria-busy", "true");
+  if (st.options && typeof st.options.refreshPath === "function") {
+    try {
+      var livePath = st.options.refreshPath();
+      if (livePath) st.path = livePath;
+    } catch (e) {}
+  }
+  confirmBeacon("confirm-submit", st.kind, "started", "path=" + (st.path || "unknown"));
+
+  var action;
+  try { action = st.options && st.options.onConfirm ? st.options.onConfirm() : true; }
+  catch (e) { action = Promise.reject(e); }
+
+  Promise.resolve(action).then(function(value){
+    var ok = !(value === false || (value && value.ok === false));
+    confirmBeacon("confirm-submit", st.kind, ok ? "success" : "failed",
+                  "path=" + (st.path || "unknown"));
+    finishConfirm({ confirmed:true, ok:ok, value:value, __confirmAction:true });
+  }, function(e){
+    var msg = (e && e.message) || String(e);
+    confirmBeacon("confirm-submit", st.kind, "failed", "path=" + (st.path || "unknown"));
+    addSys("操作失败：" + msg, "bad");
+    finishConfirm({ confirmed:true, ok:false, error:msg, __confirmAction:true });
+  });
+  return true;
+}
+
+/** 打开确认请求；同一时间已有请求时只保留第一个。 */
+function openConfirm(options){
+  options = options || {};
+  if (confirmState) {
+    confirmBeacon("confirm-open", options.kind, "busy");
+    return Promise.resolve({ confirmed:false, ok:false, busy:true });
+  }
+
+  var modal = $("confirmModal");
+  var submit = $("confirmSubmit");
+  var cancel = $("confirmCancel");
+  var close = $("confirmClose");
+  var previous = (typeof document !== "undefined" && document.activeElement)
+               ? document.activeElement : null;
+  confirmState = {
+    kind: options.kind || "unknown",
+    path: options.path || "unknown",
+    options: options,
+    previousFocus: previous,
+    busy: false,
+    resolve: null
+  };
+  var promise = new Promise(function(resolve){ confirmState.resolve = resolve; });
+
+  $("confirmTitle").textContent = options.title || "请确认操作";
+  $("confirmBody").textContent = options.body || "确认继续吗？";
+  $("confirmNote").textContent = options.note || "";
+  submit.textContent = options.actionText || "确认发送";
+  submit.disabled = false;
+  cancel.disabled = false;
+  close.disabled = false;
+  modal.classList.add("show");
+  confirmBeacon("confirm-open", confirmState.kind, "shown", "path=" + confirmState.path);
+  /* 取消默认获得焦点，回车不会直接触发不可逆动作。 */
+  focusElement(cancel);
+  return promise;
+}
+
+$("confirmCancel").addEventListener("click", function(e){
+  if (e && e.stopPropagation) e.stopPropagation();
+  cancelConfirm("button");
+});
+$("confirmClose").addEventListener("click", function(e){
+  if (e && e.stopPropagation) e.stopPropagation();
+  cancelConfirm("close");
+});
+$("confirmSubmit").addEventListener("click", function(e){
+  if (e && e.stopPropagation) e.stopPropagation();
+  submitConfirm();
+});
+$("confirmModal").addEventListener("click", function(e){
+  if (e && e.target === this) cancelConfirm("overlay");
+});
+
 /* ---------- 弹出面板 ---------- */
 function showPop(id){
   ["popBridge","popKey","popTest","popBind"].forEach(function(p){ $(p).classList.toggle("show", p === id); });
@@ -864,11 +1074,35 @@ function hidePops(){
 }
 document.addEventListener("click", function(e){
   if (e.target.closest(".pop") || e.target.closest(".pill")) return;
+  if (keyConfirmPending) {
+    keyConfirmPending = false;
+    keyConfirmSerial++;
+    beacon("confirm-cancel", "kind=key status=cancelled reason=outside");
+  }
   hidePops();
 });
-document.addEventListener("keydown", function(e){ if (e.key === "Escape") hidePops(); });
+document.addEventListener("keydown", function(e){
+  if (e.key !== "Escape") return;
+  if (confirmState) { if (e.preventDefault) e.preventDefault(); cancelConfirm("escape"); }
+  else {
+    if (keyConfirmPending) {
+      keyConfirmPending = false;
+      keyConfirmSerial++;
+      beacon("confirm-cancel", "kind=key status=cancelled reason=escape-pending");
+    }
+    hidePops();
+  }
+});
 Array.prototype.forEach.call(document.querySelectorAll("[data-close]"), function(b){
-  b.addEventListener("click", function(){ hidePops(); });
+  b.addEventListener("click", function(){
+    var id = b.getAttribute && b.getAttribute("data-close");
+    if (id === "popKey" && keyConfirmPending) {
+      keyConfirmPending = false;
+      keyConfirmSerial++;
+      beacon("confirm-cancel", "kind=key status=cancelled reason=panel-close");
+    }
+    hidePops();
+  });
 });
 
 /* ---------- 顶栏状态刷新 ---------- */
@@ -1041,12 +1275,21 @@ function doSend(plaintext){
     // 想连微信一起测就勾上「出站密文同时也发到微信」。
     var alsoWechat = !testMode || $("chkTestToWechat").checked;
 
-    if (alsoWechat && Bridge.isConnected() && sendViaBridge(env, "消息")) {
+    var bridgeWasOnline = Bridge.isConnected();
+    if (alsoWechat && bridgeWasOnline && sendViaBridge(env, "消息")) {
       addBubble(plaintext, "out", "我 → 微信当前对话");
     } else if (alsoWechat) {
-      copyText(env);
-      addBubble(plaintext, "out", "我（密文已复制，去微信粘贴）");
-      addSys("桥未连接，密文已放进剪贴板，手动 Ctrl+V 到微信即可");
+      copyText(env).then(function(ok){
+        if (ok) {
+          addBubble(plaintext, "out", "我（密文已复制，去微信粘贴）");
+          addSys(bridgeWasOnline
+            ? "桥发送失败，密文已复制，请手动粘贴到微信当前窗口中获得焦点的会话"
+            : "桥未连接，密文已复制，请手动粘贴到微信当前窗口中获得焦点的会话", "ok");
+        } else {
+          addBubble(plaintext, "out", "我（密文复制失败，未发送）");
+          addSys("桥未连接且剪贴板不可用：请允许 Edge 文件页访问剪贴板，或手动复制密文", "bad");
+        }
+      });
     } else {
       addBubble(plaintext, "out", "我（测试模式，未发到微信）");
     }
@@ -1058,16 +1301,57 @@ function doSend(plaintext){
 }
 
 function copyText(t){
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(t).catch(function(){ fallbackCopy(t); });
-  } else { fallbackCopy(t); }
+  /* 始终返回 Promise<boolean>，调用方据此决定是否显示"已复制"。 */
+  return new Promise(function(resolve){
+    var settled = false;
+    function done(ok, method, err){
+      if (settled) return;
+      settled = true;
+      copyText.lastMethod = method;
+      copyText.lastError = err || null;
+      var extra = "method=" + method + " status=" + (ok ? "success" : "failed");
+      if (err && err.name) extra += " error=" + String(err.name).replace(/[^A-Za-z0-9_.-]/g, "_");
+      beacon(ok ? "copy-success" : "copy-failure", extra);
+      resolve(!!ok);
+    }
+    function fallback(apiError){
+      var ta = null;
+      var ok = false;
+      try {
+        ta = document.createElement("textarea");
+        ta.value = String(t == null ? "" : t);
+        ta.setAttribute && ta.setAttribute("readonly", "");
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        ta.style.pointerEvents = "none"; ta.style.left = "-10000px";
+        document.body.appendChild(ta);
+        ta.focus && ta.focus();
+        ta.select && ta.select();
+        ok = !!(document.execCommand && document.execCommand("copy"));
+      } catch (e) {
+        ok = false;
+      }
+      try { if (ta) document.body.removeChild(ta); } catch (e2) {}
+      done(ok, "execCommand", ok ? null : (apiError || null));
+    }
+
+    var clip = (typeof navigator !== "undefined") ? navigator.clipboard : null;
+    if (clip && typeof clip.writeText === "function") {
+      try {
+        Promise.resolve(clip.writeText(String(t == null ? "" : t))).then(function(){
+          done(true, "clipboard", null);
+        }, function(e){ fallback(e); });
+      } catch (e) { fallback(e); }
+    } else {
+      fallback(null);
+    }
+  });
 }
-function fallbackCopy(t){
-  var ta = document.createElement("textarea");
-  ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
-  document.body.appendChild(ta); ta.select();
-  try { document.execCommand("copy"); } catch (e) {}
-  document.body.removeChild(ta);
+copyText.lastMethod = "";
+copyText.lastError = null;
+
+function copyErrorName(){
+  var e = copyText.lastError;
+  return e && e.name ? String(e.name) : "剪贴板权限错误";
 }
 
 /* ---------- 收到密文 ---------- */
@@ -1284,6 +1568,7 @@ function testExit(){
   testMode = false;
   beacon("test-exit");
   Crypto.resetIdentity().then(function(){
+    myKeySent = false;
     addSys("已退出测试模式，密钥已重置（假对方的会话密钥丢弃了）");
     refreshTestPill(); refreshPills();
   }).catch(function(e){ addSys("退出测试时出错: " + e.message, "bad"); });
@@ -1411,6 +1696,163 @@ function selfKeyFeed(){
   beacon("peer-test-self");
 }
 
+/* ---------- 公钥发送/复制与重置的确认动作 ---------- */
+var keyConfirmPending = false;
+var keyConfirmSerial = 0;
+
+function hideKeyCopyFallback(){
+  var box = $("keyCopyFallback");
+  if (box) box.classList.remove("show");
+  if ($("keyManualCopy")) $("keyManualCopy").value = "";
+  if ($("keyCopyError")) $("keyCopyError").textContent = "";
+}
+
+function showKeyCopyFallback(env, detail){
+  var box = $("keyCopyFallback");
+  var area = $("keyManualCopy");
+  var msg = $("keyCopyError");
+  if (!box || !area || !msg) return;
+  area.value = env || "";
+  msg.textContent = detail || "剪贴板不可用，请在下方文本框中手动选择并复制公钥。";
+  box.classList.add("show");
+}
+
+function keyConfirmBody(connected, source){
+  var target = "发送目标：微信当前窗口中获得焦点的会话。";
+  var route;
+  if (source === "copy-button") {
+    route = connected
+      ? "桥当前在线；此按钮确认后只复制公钥到剪贴板，不会通过桥发送。"
+      : "桥当前离线；确认后只复制公钥到剪贴板，请手动粘贴到这个会话。";
+  } else {
+    route = connected
+      ? "桥在线：确认后会把公钥发送到这个会话。"
+      : "桥离线：确认后只复制公钥到剪贴板，请手动粘贴到这个会话。";
+  }
+  var read = (boundWho || boundTable)
+    ? "当前读取绑定为「" + (boundWho || boundTable) + "」，它只影响读取，不改变发送目标。"
+    : "当前读取为自动模式；读取绑定只影响读取，不改变发送目标。";
+  var sourceLine = source === "copy-button" ? "这是一次明确的公钥复制请求。" : "这是一次公钥交换请求。";
+  return sourceLine + "\n" + target + "\n" + route + "\n" +
+         "本机公钥指纹：" + Crypto.myFingerprint() + "\n" + read;
+}
+
+function copyPublicKey(env, connected, source, markSent){
+  return copyText(env).then(function(ok){
+    if (ok) {
+      if (markSent) myKeySent = true;
+      hideKeyCopyFallback();
+      refreshPills();
+      var msg = source === "copy-button"
+        ? "公钥已复制（指纹 " + Crypto.myFingerprint() + "），请手动粘贴到微信当前窗口中获得焦点的会话"
+        : (connected
+        ? "桥发送失败，公钥已复制，请手动粘贴到微信当前窗口中获得焦点的会话"
+        : "桥离线，公钥已复制。请手动粘贴到微信当前窗口中获得焦点的会话");
+      addSys(msg, "ok");
+      return { ok:true, path:"clipboard", source:source };
+    }
+    var detail = "复制公钥失败（" + copyErrorName()
+      + "）：Edge 文件页可能未获剪贴板权限；请在下方手动选择公钥并 Ctrl+C。";
+    showKeyCopyFallback(env, detail);
+    addSys(detail, "bad");
+    return { ok:false, path:"clipboard", source:source };
+  });
+}
+
+function performKeyAction(source){
+  /* 确认期间桥状态可能变化，路径必须在提交瞬间重新读取。 */
+  var connected = Bridge.isConnected();
+  if (confirmState) confirmState.path = source === "copy-button"
+    ? "clipboard" : (connected ? "bridge" : "clipboard");
+  var env = Crypto.myKeyEnvelope();
+  if (source === "copy-button") {
+    beacon("key-action", "source=" + source + " path=clipboard");
+    return copyPublicKey(env, connected, source, false);
+  }
+  beacon("key-action", "source=" + source + " path=" + (connected ? "bridge" : "clipboard"));
+
+  if (connected && sendViaBridge(env, "公钥")) {
+    myKeySent = true;
+    hideKeyCopyFallback();
+    refreshPills();
+    addSys("公钥已交给桥（指纹 " + Crypto.myFingerprint() + "），等回执…");
+    addSys("注意：发出自己的公钥不会让你变绿 —— 要等对方的公钥进来");
+    return Promise.resolve({ ok:true, path:"bridge", source:source });
+  }
+
+  if (connected) addSys("桥发送失败，改走剪贴板兜底");
+  return copyPublicKey(env, connected, source, true);
+}
+
+function requestKeyConfirmation(source){
+  if (confirmState || keyConfirmPending) {
+    beacon("confirm-open", "kind=key status=busy source=" + source);
+    return;
+  }
+  keyConfirmPending = true;
+  var serial = ++keyConfirmSerial;
+  showPop("popKey");
+  beacon("key-confirm-request", "source=" + source);
+  Crypto.ensureIdentity().then(function(){
+    keyConfirmPending = false;
+    if (serial !== keyConfirmSerial) return;
+    if (confirmState) return;
+    var connected = Bridge.isConnected();
+    var route = source === "copy-button" ? "clipboard" : (connected ? "bridge" : "clipboard");
+    openConfirm({
+      kind: "key",
+      path: route,
+      title: "确认发送公钥",
+      body: keyConfirmBody(connected, source),
+      note: "确认框关闭前不会发送或写入剪贴板。",
+      actionText: "确认发送",
+      refreshPath: function(){
+        return source === "copy-button"
+          ? "clipboard" : (Bridge.isConnected() ? "bridge" : "clipboard");
+      },
+      onConfirm: function(){ return performKeyAction(source); }
+    });
+  }).catch(function(e){
+    keyConfirmPending = false;
+    if (serial !== keyConfirmSerial) return;
+    addSys("密钥初始化失败：" + e.message, "bad");
+    beacon("key-confirm-request", "source=" + source + " status=failed");
+  });
+}
+
+function requestResetConfirmation(){
+  if (confirmState || keyConfirmPending) {
+    beacon("reset-confirm", "status=busy");
+    return;
+  }
+  Crypto.ensureIdentity().then(function(){
+    if (confirmState) return;
+    var fp = Crypto.myFingerprint();
+    openConfirm({
+      kind: "reset",
+      path: "local",
+      title: "确认重置密钥",
+      body: "当前公钥指纹：" + fp + "\n重置后旧配对立即失效，对方需要重新交换公钥。",
+      note: "取消会保留当前会话和指纹。",
+      actionText: "重置密钥",
+      onConfirm: function(){
+        confirmBeacon("reset-confirm", "reset", "submit");
+        return Crypto.resetIdentity().then(function(){
+          myKeySent = false;
+          hideKeyCopyFallback();
+          refreshPills();
+          addSys("已重置本机密钥（旧配对已失效，对方需要重新交换公钥）", "ok");
+          confirmBeacon("reset-confirm", "reset", "success");
+          return { ok:true, path:"local" };
+        }, function(e){
+          confirmBeacon("reset-confirm", "reset", "failed");
+          throw e;
+        });
+      }
+    });
+  }).catch(function(e){ addSys("密钥初始化失败：" + e.message, "bad"); });
+}
+
 /* ---------- 三个药丸的点击行为 ---------- */
 $("pillBridge").addEventListener("click", function(e){
   e.stopPropagation();
@@ -1427,31 +1869,15 @@ $("pillTest").addEventListener("click", function(e){
   showPop("popTest");
 });
 
-/**
- * 点「密钥」= 直接交换公钥。
- * 桥在就直接发到微信；桥不在就复制到剪贴板，并提示去粘贴。
- */
+/** 点「密钥」仍是一键入口，但真正发送/复制前先经过确认层。 */
 $("pillKey").addEventListener("click", function(e){
   e.stopPropagation();
   beacon("pill-key-click");
-  if ($("popKey").classList.contains("show")) { hidePops(); return; }
-
-  var env = Crypto.myKeyEnvelope();
-  showPop("popKey");
-  myKeySent = true;
-  if (Bridge.isConnected()) {
-    if (sendViaBridge(env, "公钥")) {
-      addSys("公钥已交给桥（指纹 " + Crypto.myFingerprint() + "），等回执…");
-      addSys("注意：发出自己的公钥不会让你变绿 —— 要等对方的公钥进来");
-    } else {
-      copyText(env);
-      addSys("改走剪贴板：公钥已复制，去微信里 Ctrl+V 即可", "ok");
-    }
-  } else {
-    copyText(env);
-    addSys("桥未连接，公钥已复制到剪贴板 —— 去微信粘贴给对面即可", "ok");
+  if ($("popKey").classList.contains("show") && !confirmState && !keyConfirmPending) {
+    hidePops();
+    return;
   }
-  refreshPills();
+  requestKeyConfirmation("pill");
 });
 
 $("send").addEventListener("click", function(){
@@ -1796,14 +2222,21 @@ $("chkAutoPull").addEventListener("change", function(){
 });
 
 $("btnCopyKey").addEventListener("click", function(){
-  copyText(Crypto.myKeyEnvelope());
-  addSys("公钥已复制（指纹 " + Crypto.myFingerprint() + "）", "ok");
+  requestKeyConfirmation("copy-button");
 });
 $("btnReset").addEventListener("click", function(){
-  Crypto.resetIdentity().then(function(){
-    addSys("已重置本机密钥（对方需要重新交换公钥）");
-    refreshPills();
-  });
+  requestResetConfirmation();
+});
+$("btnSelectKey").addEventListener("click", function(){
+  var area = $("keyManualCopy");
+  try {
+    area.focus(); area.select();
+    addSys("公钥已选中，请按 Ctrl+C 手动复制", "ok");
+    beacon("copy-manual-select", "kind=key status=selected");
+  } catch (e) {
+    addSys("无法选中公钥，请在文本框内长按或拖选后复制", "bad");
+    beacon("copy-manual-select", "kind=key status=failed");
+  }
 });
 
 /* ---------- 桥的一键下载 ---------- */
@@ -1969,7 +2402,7 @@ function makeZip(entries){
  * 不用担心 < > | & % 破坏 echo），运行时解码 -> 编译 -> 启动。
  * 刻意全用 ASCII：.bat 里写中文会因编码问题炸掉（踩过）。
  */
-function buildInstaller(){
+function buildSourceInstaller(){
   var CHUNK = 1800;
   var lines = [];
 
@@ -1982,6 +2415,7 @@ function buildInstaller(){
       out.push((i === 0 ? "> " : ">> ") + name + ".b64 echo " + part);
     }
     out.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw " + name + ".b64) -replace '\\s',''; [IO.File]::WriteAllBytes('" + name + "', [Convert]::FromBase64String($b))\"");
+    out.push("if errorlevel 1 ( echo   [X] unpack " + name + " failed. ^& pause ^& exit /b 1 )");
     out.push("if not exist " + name + " ( echo   [X] unpack " + name + " failed. & pause & exit /b 1 )");
     out.push("del " + name + ".b64");
     return out;
@@ -1994,6 +2428,7 @@ function buildInstaller(){
   lines.push("echo   Minimal IM - bridge installer");
   lines.push("echo   ------------------------------");
   lines.push("echo.");
+  lines = lines.concat(bridgePreflightLines());
   lines.push("echo   [1/3] unpacking bridge.cs, wxdb.cs ...");
   lines = lines.concat(unpack("bridge.cs", BRIDGE_B64));
   lines = lines.concat(unpack("wxdb.cs", WXDB_B64));
@@ -2018,6 +2453,100 @@ function buildInstaller(){
   return lines.join("\r\n") + "\r\n";
 }
 
+/*
+ * 安装前先查旧 bridge.exe 和 8765 端口。
+ * 正在运行的 exe 会锁住自己，直接覆盖会让 PowerShell WriteAllBytes 报
+ * "文件正由另一进程使用"，旧脚本随后还会误报已启动。预检命中后保留旧桥，
+ * 让用户继续使用它；需要升级时先关闭旧进程再运行安装器。
+ */
+function bridgePreflightLines(){
+  return [
+    "echo   checking for an existing bridge ...",
+    "set PREFLIGHT_FILE=%TEMP%\\minimal-im-bridge-preflight-%RANDOM%.txt",
+    "powershell -NoProfile -Command \"$target=[IO.Path]::GetFullPath((Join-Path (Get-Location) 'bridge.exe')); $owner=$null; try{$owner=Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction Stop | Select-Object -First 1}catch{}; if($owner){$p=$null; try{$p=Get-Process -Id $owner.OwningProcess -ErrorAction Stop}catch{}; $path=''; if($p){try{$path=$p.MainModule.FileName}catch{}}; Write-Output ('PORT|PID='+$owner.OwningProcess+'|PATH='+$path); exit 10}; foreach($p in (Get-Process bridge -ErrorAction SilentlyContinue)){ $path=''; try{$path=$p.MainModule.FileName}catch{}; if($path -and ([IO.Path]::GetFullPath($path) -ieq $target)){ Write-Output ('FILE|PID='+$p.Id+'|PATH='+$path); exit 11 } }; exit 0\" > \"%PREFLIGHT_FILE%\" 2>&1",
+    "set PREFLIGHT_RC=%ERRORLEVEL%",
+    "if not \"%PREFLIGHT_RC%\"==\"0\" (",
+    "  echo   [!] bridge preflight blocked installation:",
+    "  type \"%PREFLIGHT_FILE%\"",
+    "  echo   Existing bridge/port kept intact. Close that process before upgrading.",
+    "  del /f /q \"%PREFLIGHT_FILE%\"",
+    "  pause",
+    "  exit /b 0",
+    ")",
+    "del /f /q \"%PREFLIGHT_FILE%\"",
+    ""
+  ];
+}
+
+/*
+ * --standalone 页面走这条路：把已经编好的 bridge.exe 解码到当前目录，
+ * 再启动它。浏览器仍只负责保存安装器，启动动作由用户双击完成。
+ */
+function buildEmbeddedInstaller(){
+  var CHUNK = 1800;
+  var lines = [];
+
+  function unpack(name, b64){
+    var out = [];
+    out.push("if exist " + name + ".b64 del /f /q " + name + ".b64");
+    for (var i = 0; i < b64.length; i += CHUNK) {
+      var part = b64.substr(i, CHUNK);
+      out.push((i === 0 ? "> " : ">> ") + name + ".b64 echo " + part);
+    }
+    out.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw " + name + ".b64) -replace '\\s',''; [IO.File]::WriteAllBytes('" + name + "', [Convert]::FromBase64String($b))\"");
+    out.push("if errorlevel 1 ( echo   [X] unpack " + name + " failed. ^& pause ^& exit /b 1 )");
+    out.push("if not exist " + name + " ( echo   [X] unpack " + name + " failed. ^& pause ^& exit /b 1 )");
+    out.push("del /f /q " + name + ".b64");
+    return out;
+  }
+
+  lines.push("@echo off");
+  lines.push("setlocal enabledelayedexpansion");
+  lines.push("cd /d \"%~dp0\"");
+  lines.push("echo.");
+  lines.push("echo   Minimal IM - prebuilt bridge installer");
+  lines.push("echo   --------------------------------------");
+  lines.push("echo.");
+  lines = lines.concat(bridgePreflightLines());
+  lines.push("echo   [1/2] unpacking bridge.exe ...");
+  lines = lines.concat(unpack("bridge.exe", BRIDGE_EXE_B64));
+  lines.push("");
+  lines.push("echo   [2/2] starting bridge ...");
+  lines.push("echo.");
+  lines.push("echo   Bridge is running. Keep this window open.");
+  lines.push("echo   Now go back to the page - it reconnects by itself.");
+  lines.push("echo.");
+  lines.push("bridge.exe");
+  lines.push("pause");
+  return lines.join("\r\n") + "\r\n";
+}
+
+function buildInstaller(){
+  return BRIDGE_EXE_B64 ? buildEmbeddedInstaller() : buildSourceInstaller();
+}
+
+function refreshInstallCopy(){
+  var embedded = !!BRIDGE_EXE_B64;
+  $("bridgeModeDescription").textContent = embedded
+    ? "页面内含已编译的 bridge.exe，安装器只需释放并启动它。"
+    : "页面内含桥源码，安装器会调用 Windows 自带的 C# 编译器现场生成它。";
+  $("bridgeBuildDescription").textContent = embedded
+    ? "这是预编译单文件版，不需要现场编译。"
+    : "源码安装版不需要 Python、Node 或 .NET SDK。";
+}
+
+/*
+ * 最短路径：交给浏览器下载管道，文件会出现在 Edge 下载栏，
+ * 用户点一次文件即可运行，省掉打开资源管理器寻找保存目录的步骤。
+ * .bat 仍由 Windows 的用户手势启动；浏览器不会静默执行本地程序。
+ */
+function quickDownloadInstaller(){
+  var bat = buildInstaller();
+  beacon("install-download-click", "bat=" + bat.length + " chars");
+  download("install-bridge.bat", bat);
+  addSys("安装脚本已放入 Edge 下载栏 —— 若提示「可能有害」先点「保留」，再点 install-bridge.bat 运行", "ok");
+}
+
 function installBridge(){
   var bat = buildInstaller();
   beacon("install-click", "bat=" + bat.length + " chars");
@@ -2025,7 +2554,7 @@ function installBridge(){
     beacon("install-done", how);
     if (how === "cancelled") { addSys("已取消保存"); return; }
     if (how === "saved") {
-      addSys("已保存 install-bridge.bat —— 双击运行即可", "ok");
+      addSys("已保存 install-bridge.bat —— 在刚选的目录中双击运行即可", "ok");
     } else if (how === "download") {
       addSys("已触发下载 install-bridge.bat —— 若浏览器提示「可能有害」，点「保留」", "ok");
     } else {
@@ -2058,17 +2587,18 @@ function showPasteFallback(){
   $("pasteModal").classList.add("show");
   try { area.focus(); area.select(); } catch (e) { /* 选区失败不影响复制按钮 */ }
 
-  // 顺手试一下剪贴板 API；失败完全没关系，用户可以自己 Ctrl+C
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(bat).then(function(){
-        $("pasteMsg").textContent = "已复制到剪贴板 ✓（" + bat.length + " 字符）";
-        beacon("paste-copied");
-      }, function(e){
-        beacon("paste-copy-failed", (e && e.name) || "Unknown");
-      });
+  /* 顺手尝试复制；API 被 Edge 拒绝时把状态留在弹层里，手动 Ctrl+C 仍可用。 */
+  copyText(bat).then(function(ok){
+    if (ok) {
+      $("pasteMsg").textContent = "已复制到剪贴板 ✓（" + bat.length + " 字符）"
+        + (copyText.lastError ? "（Edge API " + copyErrorName() + " 被拒后使用兼容复制路径）" : "");
+      beacon("paste-copied", "status=success");
+    } else {
+      $("pasteMsg").textContent = "剪贴板 API " + copyErrorName()
+        + " 被 Edge 拒绝或不可用，请在文本框中 Ctrl+A 后按 Ctrl+C";
+      beacon("paste-copy-failed", "status=failed");
     }
-  } catch (e) { /* 忽略 */ }
+  });
 }
 
 function closePasteFallback(){
@@ -2088,18 +2618,27 @@ $("btnPasteBig").addEventListener("click", showPasteFallback);
 $("btnClosePaste").addEventListener("click", closePasteFallback);
 $("btnCopyPaste").addEventListener("click", function(){
   var area = $("pasteArea");
-  try { area.focus(); area.select(); document.execCommand("copy");
-        $("pasteMsg").textContent = "已复制 ✓";
-        beacon("paste-copied-exec"); }
-  catch (e) { $("pasteMsg").textContent = "请手动按 Ctrl+C"; }
+  area.focus(); area.select();
+  copyText(area.value).then(function(ok){
+    if (ok) {
+      $("pasteMsg").textContent = "已复制 ✓"
+        + (copyText.lastError ? "（Edge API " + copyErrorName() + " 被拒后使用兼容复制路径）" : "");
+      beacon("paste-copied-exec", "status=success");
+    } else {
+      $("pasteMsg").textContent = "剪贴板 API " + copyErrorName()
+        + " 被 Edge 拒绝或不可用，请手动按 Ctrl+C";
+      beacon("paste-copied-exec", "status=failed");
+    }
+  });
 });
 $("pasteArea").addEventListener("click", function(){ this.select(); });
 $("pasteModal").addEventListener("click", function(e){
   if (e.target === this) closePasteFallback();   // 点遮罩关闭
 });
 
-$("btnDownload").addEventListener("click", installBridge);
-$("btnInstallBig").addEventListener("click", installBridge);
+$("btnDownload").addEventListener("click", quickDownloadInstaller);
+$("btnSaveInstall").addEventListener("click", installBridge);
+$("btnInstallBig").addEventListener("click", quickDownloadInstaller);
 $("btnShowSrc").addEventListener("click", function(){
   saveFile("bridge.cs", bridgeSource());
   saveFile("wxdb.cs", wxdbSource());
@@ -2109,6 +2648,7 @@ $("btnShowSrc").addEventListener("click", function(){
 /* =====================================================================
  * 启动
  * ===================================================================== */
+refreshInstallCopy();
 console.log("极简 IM build:", BUILD);
 Array.prototype.forEach.call(document.querySelectorAll(".js-build"), function(e){
   e.textContent = "构建 " + BUILD;

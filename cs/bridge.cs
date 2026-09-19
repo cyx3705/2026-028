@@ -51,6 +51,8 @@ internal static class Bridge
 
     private static readonly object ClientsLock = new object();
     private static readonly List<TcpClient> Clients = new List<TcpClient>();
+    // 进程级单实例锁；旧版本没有这个锁时仍由 TcpListener.Start 的端口检查兜底。
+    private static Mutex _singleInstanceMutex;
 
     private static string _pagePath;
     private static string _lastSentText = "";
@@ -1997,6 +1999,30 @@ internal static class Bridge
         if (_readMode != "clip") _readMode = "mem";
         _startedAt = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
 
+        bool createdNew;
+        try
+        {
+            _singleInstanceMutex = new Mutex(true, "Local\\MinimalIM.Bridge." + port, out createdNew);
+            if (!createdNew)
+            {
+                Process[] existing = Process.GetProcessesByName("bridge");
+                for (int i = 0; i < existing.Length; i++)
+                {
+                    if (existing[i].Id == Process.GetCurrentProcess().Id) continue;
+                    string existingPath = "";
+                    try { existingPath = existing[i].MainModule.FileName; }
+                    catch { existingPath = "路径不可读"; }
+                    Log("已有 bridge 进程: pid=" + existing[i].Id + " path=" + existingPath);
+                }
+                Log("端口 " + port + " 已有桥在运行，本实例退出；请继续使用现有桥。");
+                return 0;
+            }
+        }
+        catch (Exception mex)
+        {
+            Log("单实例检查失败，将继续依赖端口检查: " + mex.Message);
+        }
+
         // 页面不是必须的：chat.html 用 file:// 直接打开也能连上这个 WebSocket。
         // 所以这里只是"有就顺便托管并自动开浏览器"，没有也照样工作。
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -2015,6 +2041,29 @@ internal static class Bridge
             Log("页面   " + _pagePath);
         else
             Log("页面   无（不影响使用，直接双击 chat.html 即可）");
+
+        // 先占住端口。这样旧版 bridge.exe（没有单实例锁）或其它程序占用
+        // 8765 时，会在启动线程/剪贴板监听前给出清晰结果，而不是稍后抛出
+        // 一串难以定位的异常。
+        TcpListener listener = new TcpListener(IPAddress.Loopback, port);
+        try
+        {
+            listener.Start();
+        }
+        catch (SocketException sex)
+        {
+            Process[] oldBridges = Process.GetProcessesByName("bridge");
+            for (int i = 0; i < oldBridges.Length; i++)
+            {
+                if (oldBridges[i].Id == Process.GetCurrentProcess().Id) continue;
+                string oldPath = "";
+                try { oldPath = oldBridges[i].MainModule.FileName; }
+                catch { oldPath = "路径不可读"; }
+                Log("检测到已有 bridge.exe: pid=" + oldBridges[i].Id + " path=" + oldPath);
+            }
+            Log("端口 " + port + " 已被占用，当前实例退出（错误 " + sex.SocketErrorCode + "）。");
+            return 2;
+        }
 
         FindWeChat();
         if (_wechatHwnd == IntPtr.Zero)
@@ -2039,8 +2088,6 @@ internal static class Bridge
         auto.IsBackground = true;
         auto.Start();
 
-        TcpListener listener = new TcpListener(IPAddress.Loopback, port);
-        listener.Start();
         Log("监听中...  Ctrl+C 退出");
 
         if (openBrowser)

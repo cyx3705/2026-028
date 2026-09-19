@@ -1,12 +1,12 @@
 # page/ —— 单文件加密聊天页
 
-**一个 135 KB 的 HTML 文件，发给对方，双击就能用。**
-它自己带着桥的源码，所以对方不需要你先给别的任何东西。
+**一个单文件 HTML，发给对方，双击就能用。**
+默认页面自己带着桥的源码；也可以生成一个仓库外的预编译单文件发布页。
 
 ```
 chat.html  ──WebSocket──▶  bridge.exe  ──剪贴板＋键盘──▶  微信
     │                            ▲
-    │  内嵌 bridge.cs (47 KB)     └── 剪贴板监听 ◀── 你在微信里 Ctrl+C
+    │  内嵌 bridge.cs              └── 剪贴板监听 ◀── 你在微信里 Ctrl+C
     └── 点一下就能生成安装包
 ```
 
@@ -17,24 +17,41 @@ chat.html  ──WebSocket──▶  bridge.exe  ──剪贴板＋键盘──�
 | 文件 | 说明 |
 |---|---|
 | `chat.html` | **最终产物**。发给对方的就是这一个文件 |
-| `template.html` | 源码模板（占位符 `__BRIDGE_B64__` / `__BUILD__`） |
-| `build_page.py` | 把 `../cs/bridge.cs` 以 base64 注入模板，生成 `chat.html` |
+| `template.html` | 源码模板（源码、可选 EXE 和构建戳占位符） |
+| `build_page.py` | 把桥源码注入模板；`--standalone` 还会把 `bridge.exe` 注入 `../dist/chat-standalone.html` |
 | `check_ids.py` | 静态自检：脚本里 `$("x")` 引用的元素必须真的存在 |
 | `test_loopback.js` | 密码学验证（抠出页面里的 Crypto 模块跑真 WebCrypto，18/18） |
-| `test_receive.js` | 接收路径验证（DOM 桩里跑真的 `handleIncoming`，52/52） |
+| `test_receive.js` | 接收路径、确认层和界面状态验证（DOM 桩，145/145） |
 
 重新生成，然后**两个自检都要过**：
 
 ```cmd
-python build_page.py
+python build_page.py                  REM 生成仓库内的源码安装页
+python build_page.py --standalone     REM 生成仓库外的预编译单文件页（需先 build bridge）
 node test_loopback.js          REM 密码学（18/18）
-node test_receive.js           REM 接收路径与界面状态（52/52）
+node test_receive.js           REM 接收、确认与界面状态（145/145）
+node test_receive.js ..\dist\chat-standalone.html  REM 独立版同等接收测试
 python check_ids.py chat.html  REM 元素引用
 ```
 
+### 预编译单文件发布页
+
+需要减少对方机器上的编译步骤时，先在 Windows 上运行 `../cs/build.bat`，再执行：
+
+```cmd
+python build_page.py --standalone
+```
+
+脚本会生成 `../dist/chat-standalone.html`。该文件把当前 `bridge.exe` 编码进页面，
+页面生成的安装器只释放并启动它，不再调用 `csc.exe`。`dist/` 和 `cs/bridge.exe`
+均已加入 `.gitignore`，不会进入仓库；普通的 `chat.html` 仍只包含源码安装路径。
+
+浏览器出于本地程序启动限制，页面会保存一个安装器，最后仍需用户双击一次；
+这是单文件 HTML 能保留的最短交互路径。
+
 ### 构建戳
 
-每次构建都会注入一行 `时间 · bridge.cs 的 sha256 前 8 位`，
+每次构建都会注入一行 `时间 · 源码 sha256 前 8 位`；独立版还会带上 EXE 的 sha256 前 8 位，
 显示在两个弹窗底部，控制台也打印：
 
 ```
@@ -61,26 +78,39 @@ python check_ids.py chat.html  REM 元素引用
 ### ① 装桥 —— 「桥」药丸
 
 页面顶部会有一条**大横幅**：`还没装桥 —— 装好后页面会自动连上`。
-点开「桥」药丸有详细说明和三个按钮：
+点开「桥」药丸有详细说明和四个按钮：
 
 | 按钮 | 走什么路 | 什么时候用 |
 |---|---|---|
-| **⬇ 下载安装桥** | File System Access API 的「另存为」 | 默认。**不经过浏览器的下载管道**，所以不会被危险文件类型拦下 |
+| **⬇ 快速下载** | 浏览器下载管道 | 默认。文件直接出现在 Edge 下载栏，点一次文件即可运行；若提示有害先点「保留」 |
+| **选择保存位置** | File System Access API 的「另存为」 | 需要指定目录时使用；保存后在所选目录双击 |
 | **📋 手动保存（万能）** | 纯文本框 + 剪贴板 | 上面那条失败时。不下载、不调任何权限 API，**沙箱里也成立** |
 | **📤 发送测试消息** | 走桥发一条明文 | 排查"发不出去"是断在哪一段 |
 
-存成 `install-bridge.bat` 后**双击运行**：它会自己释放 `bridge.cs` →
+快速下载后，直接点 Edge 下载栏里的 `install-bridge.bat` 一次即可运行；
+选择保存位置时，在刚选的目录双击运行。脚本会自己释放 `bridge.cs` →
 用系统自带的 C# 编译器编译 → 启动。Windows 可能提示"已保护你的电脑"，
 点 **更多信息 → 仍要运行**。
+
+安装脚本启动前会检查已有 `bridge.exe` 进程和 `8765` 端口；发现旧桥时显示 PID/路径并结束安装，
+不会覆盖被旧进程锁定的 `bridge.exe`。桥自身也有单实例和端口检查，重复启动会打印现有进程后退出。
 
 **页面会自动连上，不用刷新**（桥连不上时页面无限重试，退避封顶 8 秒）。
 
 ### ② 点「密钥」→ 交换公钥
 
-点一下就是**把公钥发出去**：
+点一下会打开页面内确认框。确认框展示本机指纹、当前微信窗口中获得焦点的会话，
+以及桥在线/离线路径；确认前不会发送或写入剪贴板。绑定会话只控制读取，
+**不改变发送目标**。
+
+确认后才执行实际动作：
 
 - 桥已连接 → 公钥作为一条微信消息发出去，并显示桥的回执
-- 桥没连上 → 公钥复制到剪贴板，去微信粘贴给对面
+- 桥在线但 WebSocket 发送失败 → 复制到剪贴板并明确提示手动粘贴
+- 桥没连上 → 复制到剪贴板，去微信当前焦点会话手动粘贴
+- Edge 文件页拒绝剪贴板权限 → 显示错误和可选择复制的公钥文本框
+
+每次真正发送或复制都要重新确认；取消、Escape 或点击遮罩不会改变状态。
 
 **双方各点一次**，收到对方公钥后自动协商出会话密钥，药丸变绿。
 
@@ -91,6 +121,11 @@ python check_ids.py chat.html  REM 元素引用
 
 > 公钥长这样：`E2E1-K.BJzaNTykpvxBrAbnoVyafw3bxxMfjzdnGxHIFRq8lCY7IK3dW…`
 > 在微信里看着就是一串乱码。**私钥永远不出本机。**
+
+### 重置密钥
+
+「重置密钥」同样先确认，并显示当前指纹。确认后旧配对立即失效、对方公钥清空、
+输入框重新禁用，页面生成新身份；对方需要重新交换公钥。取消会保留当前会话和指纹。
 
 ### 📥 手动收下 —— 桥那条链断了也能接上
 
@@ -364,7 +399,13 @@ node test_loopback.js
 | **整块多行**：纯中文多行 → 逐条显示 | ✅ |
 | **解析微信导出**：拆出发送者/时间戳/正文，多行正文不被拆散 | ✅ |
 | **拉取结果**：公钥行生效、中文行显示、`ok=false` 有提示 | ✅ |
-| **合计** | **52 / 52** |
+| **确认前无副作用**：顶栏「密钥」只打开确认框，WebSocket/剪贴板均不动作 | ✅ |
+| **取消路径**：取消、Escape、遮罩关闭并恢复原焦点 | ✅ |
+| **在线发送**：确认后恰好一条公钥帧，发送成功才记录 `myKeySent` | ✅ |
+| **离线与失败兜底**：复制成功、API 拒绝后 `execCommand`、全部失败和手动入口 | ✅ |
+| **重复点击**：快速点击只保留一个确认请求和一个动作 | ✅ |
+| **重置确认**：取消保留指纹，确认后更新指纹、清空对方密钥并禁用输入框 | ✅ |
+| **合计** | **145 / 145** |
 
 ---
 
@@ -380,6 +421,9 @@ node test_loopback.js
 | `pill-bridge-click` / `pill-key-click` / `pill-test-click` | 点药丸 |
 | `install-click` / `save-start` / `picker-opened` / `picker-saved` / `picker-error` | 装桥的每一步 |
 | `paste-open` / `paste-copied` / `paste-copy-failed` | 手动保存 |
+| `confirm-open` / `confirm-cancel` / `confirm-submit` | 确认框打开、取消、提交（仅路径和状态） |
+| `copy-success` / `copy-failure` / `copy-manual-select` | 剪贴板结果（不记录完整公钥） |
+| `reset-confirm` | 重置确认的提交、成功或失败 |
 | `test-send-click` / `send-nobridge` / `send-ws-closed` / `send-reply` | 发送路径 |
 | `test-connect-click` / `test-connect-ok` / `loopback-fail` | 测试模式 |
 

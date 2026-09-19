@@ -21,7 +21,7 @@
 
 | 部件 | 是什么 | 为什么这么做 |
 |---|---|---|
-| `page/chat.html` | **单文件网页**（135 KB），发给对方的就是它 | 加解密全在浏览器里，**零安装**。它把桥的源码也内嵌进去了 |
+| `page/chat.html` | **单文件网页**（当前约 334 KB），发给对方的就是它 | 加解密全在浏览器里，**零安装**。它把桥的源码也内嵌进去了 |
 | `cs/bridge.cs` | **剪贴板桥**，C# / .NET Framework 4.x | 用每个 Windows 都自带的 `csc.exe` 现场编译，**用户什么都不用装** |
 
 桥只做两件事，都靠剪贴板：
@@ -38,11 +38,18 @@
 
 1. 把 `page/chat.html` 发给对方（微信、邮件、U 盘，随便）
 2. 对方**用浏览器直接打开这个文件**
-3. 双方各点一次右上角 **「密钥」** —— 各自的公钥作为一条普通微信消息发出去
+3. 双方各点一次右上角 **「密钥」**，在确认框核对指纹和发送路径后确认 —— 各自的公钥作为一条普通微信消息发出去
 4. 收到对方公钥后自动协商出会话密钥，之后在页面里打字即可
 
-发送目标 = **微信里当前打开的那个对话**，桥不选对话（它读不到微信内部结构）。
-所以发之前在微信里切好目标对话。
+发送目标 = **微信当前窗口中获得焦点的会话**，桥不选对话（它读不到微信内部结构）。
+所以确认前在微信里切好目标对话；顶栏的「绑定会话」只控制读取，不会改变发送目标。
+
+确认框关闭前不会发送或写入剪贴板。桥在线时确认后走 WebSocket；桥离线或 WebSocket
+发送失败时，确认后才复制公钥，并提示手动粘贴。Edge 文件页若拒绝剪贴板权限，
+页面会显示错误和可选择复制的公钥文本框。每次真正发送或复制公钥都要重新确认。
+
+「重置密钥」也会先显示当前指纹并确认；确认后旧配对失效、对方公钥清空、输入框重新禁用，
+需要重新交换公钥。取消重置会保留当前会话和指纹。
 
 ### ⚠️ 必须用浏览器直接打开文件
 
@@ -55,6 +62,11 @@ SecurityError: Sandboxed documents aren't allowed to show a file picker.
 
 用 Edge 直接打开 `file:///.../chat.html` 就没这个限制（实测 `showSaveFilePicker` 可用）。
 
+装桥时默认点「快速下载」：`install-bridge.bat` 会出现在 Edge 下载栏，点文件一次即可运行，
+不需要再打开资源管理器寻找保存目录；需要指定目录时使用「选择保存位置」。
+安装脚本和桥都会检查旧 `bridge.exe` 进程及 `8765` 端口，发现旧桥时显示 PID/路径并停止当前启动，
+避免覆盖锁定文件或并行启动第二个桥。
+
 ---
 
 ## 文件
@@ -66,15 +78,17 @@ SecurityError: Sandboxed documents aren't allowed to show a file picker.
 │
 ├── page/                      网页侧
 │   ├── chat.html              ★ 最终产物，发给对方的就是这一个文件
-│   ├── template.html          源码模板（占位符 __BRIDGE_B64__ / __BUILD__）
+│   ├── template.html          源码模板（源码、可选 EXE 和构建戳占位符）
 │   ├── build_page.py          把 cs/bridge.cs 以 base64 注入模板，生成 chat.html
 │   ├── check_ids.py           静态自检：$("x") 引用的元素必须真的存在
 │   ├── test_loopback.js       密码学验证（真 WebCrypto，18/18）
-│   ├── test_receive.js        接收路径与界面状态验证（DOM 桩，52/52）
+│   ├── test_receive.js        接收路径、确认层与界面状态验证（DOM 桩，145/145）
 │   └── README.md              网页侧详细文档
+├── dist/                      本地发布产物（git 忽略）
+│   └── chat-standalone.html   内嵌已编译 bridge.exe 的单文件页
 │
 ├── cs/                        桥
-│   ├── bridge.cs              ★ 核心，47 KB
+│   ├── bridge.cs              ★ 核心，约 93 KB
 │   ├── build.bat              用系统 csc.exe 编译
 │   ├── start.bat              编译（如需要）+ 启动
 │   └── README.md              桥的详细文档
@@ -93,7 +107,18 @@ cd page
 python build_page.py
 ```
 
-构建戳（时间 + `bridge.cs` 的 sha256 前 8 位）会注入页面，
+如果对方机器不方便现场编译，可先在 Windows 上运行 `cs\build.bat`，再生成仓库外的
+预编译单文件页：
+
+```cmd
+cd page
+python build_page.py --standalone
+```
+
+输出为 `dist\chat-standalone.html`。`dist/` 与 `cs\bridge.exe` 已被 `.gitignore`
+排除；普通 `page\chat.html` 不包含编译后的 EXE。
+
+构建戳（时间 + 源码 sha256 前 8 位；独立版再带 EXE sha256 前 8 位）会注入页面，
 显示在两个弹窗底部。**"改了没用"先看这行，对不上就是标签页没刷新。**
 
 ---
@@ -134,7 +159,7 @@ python build_page.py
 | 测试 | 覆盖 | 结果 |
 |---|---|---|
 | `page/test_loopback.js` | 把页面里的 `Crypto` 模块**原样抠出来**，在 Node 里跑真 WebCrypto：协商 / 双向收发 / 篡改被拒 / 重放被拒 / IV 不重用且递增 / **两把密钥确实不同** | **18 / 18** |
-| `page/test_receive.js` | 把整个页面脚本用 **DOM 桩**加载，直接调页面里的 `handleIncoming`（跟"对面 Ctrl+C"同一个入口）：**收下对方公钥后药丸变绿、输入框解锁、指纹显示**；自己的公钥被拒；坏公钥不破坏状态；**手动收下**各条分支；**整块多行**拆开逐条处理；**解析微信导出**（发送者/时间戳/正文）；**拉取结果**的处理 | **52 / 52** |
+| `page/test_receive.js` | 把整个页面脚本用 **DOM 桩**加载：接收路径、**确认前零副作用**、取消/Escape/遮罩/焦点恢复、在线单帧发送、离线复制、API 拒绝与 fallback、重复点击、重置确认、安装脚本旧进程检测，以及会话/拉取分支 | **145 / 145** |
 | `wsprobe.py --status` | 桥的 WebSocket 是否活着（安全探针，不碰微信、不按键） | ✅ |
 | `wsprobe.py --send "…"` | 真发一条到微信当前对话 | ✅ `{"sent","ok":true}` |
 | `test_clipboard_echo.py` | 回归测试：桥刚粘出去的内容，用户事后 `Ctrl+C` 复制回来时**必须照样推送**（不能当成回声吞掉） | ✅ |
@@ -143,6 +168,10 @@ python build_page.py
 ```cmd
 cd page
 node test_loopback.js            REM 纯逻辑，不需要浏览器、不需要微信
+node test_receive.js              REM 源码安装页（接收 + 确认，145/145）
+node test_receive.js ..\dist\chat-standalone.html REM 独立版同等测试
+python check_ids.py chat.html
+python check_ids.py ..\dist\chat-standalone.html
 
 cd ..
 python wsprobe.py --status       REM 需要桥在跑
