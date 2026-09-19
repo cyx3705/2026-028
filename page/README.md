@@ -75,6 +75,9 @@ python build_page.py --standalone
 > `SecurityError: Sandboxed documents aren't allowed to show a file picker.`
 > 用 Edge 直接打开 `file:///...\chat.html` 就没这个限制。
 
+本地调试服务器（例如 `http://127.0.0.1:8000/`）也可以直接打开页面；回环地址的页面会把
+WebSocket 自动指向本机桥的 `8765` 端口。非回环 HTTP/HTTPS 部署则需要由同源服务器代理 `/ws`。
+
 ### ① 装桥 —— 「桥」药丸
 
 页面顶部会有一条**大横幅**：`还没装桥 —— 装好后页面会自动连上`。

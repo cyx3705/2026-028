@@ -751,9 +751,18 @@ var Crypto = (function(){
  * 桥：WebSocket 客户端
  * ===================================================================== */
 var Bridge = (function(){
-  var WS_URL = (location.protocol === "http:" || location.protocol === "https:")
-    ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
-    : "ws://127.0.0.1:8765/ws";
+  var WS_URL;
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    var wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
+    var pageHost = location.hostname || "127.0.0.1";
+    var isLoopback = /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(pageHost);
+    /* 本地静态服务器（例如 :8000）不代理 WS；桥固定监听 8765。 */
+    WS_URL = isLoopback
+      ? wsScheme + pageHost + ":8765/ws"
+      : wsScheme + location.host + "/ws";
+  } else {
+    WS_URL = "ws://127.0.0.1:8765/ws";
+  }
 
   var ws = null, tries = 0, connected = false;
   var onText = null, onState = null;
@@ -2415,8 +2424,18 @@ function buildSourceInstaller(){
       out.push((i === 0 ? "> " : ">> ") + name + ".b64 echo " + part);
     }
     out.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw " + name + ".b64) -replace '\\s',''; [IO.File]::WriteAllBytes('" + name + "', [Convert]::FromBase64String($b))\"");
-    out.push("if errorlevel 1 ( echo   [X] unpack " + name + " failed. ^& pause ^& exit /b 1 )");
-    out.push("if not exist " + name + " ( echo   [X] unpack " + name + " failed. & pause & exit /b 1 )");
+    out.push("if errorlevel 1 (");
+    out.push("  echo   [X] unpack " + name + " failed.");
+    out.push("  del /f /q " + name + ".b64");
+    out.push("  pause");
+    out.push("  exit /b 1");
+    out.push(")");
+    out.push("if not exist " + name + " (");
+    out.push("  echo   [X] unpack " + name + " failed.");
+    out.push("  del /f /q " + name + ".b64");
+    out.push("  pause");
+    out.push("  exit /b 1");
+    out.push(")");
     out.push("del " + name + ".b64");
     return out;
   }
@@ -2463,10 +2482,10 @@ function bridgePreflightLines(){
   return [
     "echo   checking for an existing bridge ...",
     "set PREFLIGHT_FILE=%TEMP%\\minimal-im-bridge-preflight-%RANDOM%.txt",
-    "powershell -NoProfile -Command \"$target=[IO.Path]::GetFullPath((Join-Path (Get-Location) 'bridge.exe')); $owner=$null; try{$owner=Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction Stop | Select-Object -First 1}catch{}; if($owner){$p=$null; try{$p=Get-Process -Id $owner.OwningProcess -ErrorAction Stop}catch{}; $path=''; if($p){try{$path=$p.MainModule.FileName}catch{}}; Write-Output ('PORT|PID='+$owner.OwningProcess+'|PATH='+$path); exit 10}; foreach($p in (Get-Process bridge -ErrorAction SilentlyContinue)){ $path=''; try{$path=$p.MainModule.FileName}catch{}; if($path -and ([IO.Path]::GetFullPath($path) -ieq $target)){ Write-Output ('FILE|PID='+$p.Id+'|PATH='+$path); exit 11 } }; exit 0\" > \"%PREFLIGHT_FILE%\" 2>&1",
+    "powershell -NoProfile -Command \"$target=[IO.Path]::GetFullPath((Join-Path (Get-Location) 'bridge.exe')); $line=netstat -ano | Select-String ':8765' | Where-Object { $_.ToString() -match 'LISTENING\\s+\\d+\\s*$' } | Select-Object -First 1; if($line){$parts=($line.ToString() -split '\\s+'); $ownerPid=[int]$parts[-1]; $p=$null; try{$p=Get-Process -Id $ownerPid -ErrorAction Stop}catch{}; $path=''; if($p){try{$path=$p.MainModule.FileName}catch{}}; Write-Output ('PORT|PID='+$ownerPid+'|PATH='+$path); exit 10}; foreach($p in (Get-Process bridge -ErrorAction SilentlyContinue)){ $path=''; try{$path=$p.MainModule.FileName}catch{}; if($path -and ([IO.Path]::GetFullPath($path) -ieq $target)){ Write-Output ('FILE|PID='+$p.Id+'|PATH='+$path); exit 11 } }; exit 0\" > \"%PREFLIGHT_FILE%\" 2>&1",
     "set PREFLIGHT_RC=%ERRORLEVEL%",
     "if not \"%PREFLIGHT_RC%\"==\"0\" (",
-    "  echo   [!] bridge preflight blocked installation:",
+    "  echo   [blocked] bridge preflight blocked installation:",
     "  type \"%PREFLIGHT_FILE%\"",
     "  echo   Existing bridge/port kept intact. Close that process before upgrading.",
     "  del /f /q \"%PREFLIGHT_FILE%\"",
@@ -2494,8 +2513,18 @@ function buildEmbeddedInstaller(){
       out.push((i === 0 ? "> " : ">> ") + name + ".b64 echo " + part);
     }
     out.push("powershell -NoProfile -Command \"$b=(Get-Content -Raw " + name + ".b64) -replace '\\s',''; [IO.File]::WriteAllBytes('" + name + "', [Convert]::FromBase64String($b))\"");
-    out.push("if errorlevel 1 ( echo   [X] unpack " + name + " failed. ^& pause ^& exit /b 1 )");
-    out.push("if not exist " + name + " ( echo   [X] unpack " + name + " failed. ^& pause ^& exit /b 1 )");
+    out.push("if errorlevel 1 (");
+    out.push("  echo   [X] unpack " + name + " failed.");
+    out.push("  del /f /q " + name + ".b64");
+    out.push("  pause");
+    out.push("  exit /b 1");
+    out.push(")");
+    out.push("if not exist " + name + " (");
+    out.push("  echo   [X] unpack " + name + " failed.");
+    out.push("  del /f /q " + name + ".b64");
+    out.push("  pause");
+    out.push("  exit /b 1");
+    out.push(")");
     out.push("del /f /q " + name + ".b64");
     return out;
   }
